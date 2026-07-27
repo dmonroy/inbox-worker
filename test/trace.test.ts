@@ -31,6 +31,12 @@ describe('what gets removed', () => {
     'ARC-Authentication-Results: i=1; spf=pass',
     'X-Received: by 2002:a05',
     'Received-SPF: pass',
+    'X-Forwarded-For: ada@example.com',
+    'X-Forwarded-To: sales@example.org',
+    // Observed in production on a Gmail-originated message (DESIGN §4.2).
+    // §4 asks for the `X-Forwarded-*` family, but the list is exact names, so
+    // every member has to be spelled out or it survives the strip.
+    'X-Forwarded-Encrypted: i=1; AJvYcCXk9Qs0dGVzdA==',
   ])('%s', (header) => {
     expect(strip(`${header}\r\nSubject: Hi\r\n\r\nBody`)).toBe(
       'Subject: Hi\r\n\r\nBody',
