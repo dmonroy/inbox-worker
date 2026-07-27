@@ -75,29 +75,48 @@ A security document that overstates coverage is worse than none, so:
 
 | Property | Where | Status |
 |---|---|---|
-| Envelope-only routing, address normalisation | `src/address.ts`, `src/resolve.ts` | implemented |
-| Quarantine fallback; system inboxes unaddressable | `src/resolve.ts` | implemented |
+| Envelope-only routing, address normalisation | `src/address.ts`, `src/resolve.ts` | implemented · **run against real mail** |
+| Quarantine fallback; system inboxes unaddressable | `src/resolve.ts` | implemented · **run against real mail** |
 | Config validation fails loudly at startup | `src/config.ts`, `src/validate.ts` | implemented |
-| Content-derived identity; trace-header stripping | `src/identity.ts`, `src/trace.ts` | implemented, and used by the storage path |
-| Content-addressed R2 keys; D1 writes | `src/store.ts` | implemented |
+| Content-derived identity; trace-header stripping | `src/identity.ts`, `src/trace.ts` | implemented · **verified in production** (§4.2) |
+| Content-addressed R2 keys; D1 writes | `src/store.ts` | implemented · **verified in production** |
 | Child-row dedup keys (fan-out and retry safe) | `src/migrations.ts`, `src/store.ts` | implemented |
-| Parser caps (nesting depth, header bytes) | `src/mime.ts` | implemented |
-| Post-parse caps (attachments, bytes, participants, references) | `src/caps.ts` | implemented, **nothing calls it yet** — `storeInbound` takes the result as an input |
-| Attachment filename sanitisation | `src/mime.ts` | implemented |
-| Schema and migration runner; `migrate` command | `src/migrations.ts`, `src/cli.ts` | implemented |
-| **The email handler itself** | — | **not implemented** |
-| **Never-throw ingest and `failed_ingest`** | — | **not implemented** |
-| **Conversations, no-merge, DMARC-gated index writes** | — | **not implemented** (in review) |
+| Parser caps (nesting depth, header bytes) | `src/mime.ts` | implemented · never triggered live |
+| Post-parse caps | `src/caps.ts`, `src/handler.ts` | implemented and **called by the handler** · never triggered live |
+| Attachment filename sanitisation | `src/mime.ts` | implemented · run against real filenames |
+| Schema, migration runner, `migrate` command | `src/migrations.ts`, `src/cli.ts` | implemented · run against real D1 |
+| The email handler | `src/handler.ts` | implemented · **receiving real mail** |
+| DMARC gate, read from raw bytes by authserv-id | `src/dmarc.ts` | implemented · **passing on real mail** |
+| Conversations: no-merge, DMARC-gated index writes | `src/conversations.ts` | implemented · **threading real replies** |
+| **Never-throw ingest and `failed_ingest`** | `src/handler.ts` | implemented, **never exercised in production** — see below |
 | **`replay` command** | — | **not implemented** |
+| **Any read side** (API, UI, search, read state) | — | **not implemented** |
 
-**There is no worker entry point in `src/` today** — no `email()` handler, no
-`fetch()`, nothing Cloudflare can invoke. Storage and identity are implemented
-and tested, but nothing calls them from a request, and the ingest caps are not
-wired in at all. **Do not deploy this.**
+**This has received real mail.** A demo deployment on a live zone has taken
+messages end to end: routed, quarantined, stored, threaded, attachments
+content-addressed in R2. One attachment was pulled back out and its
+`sha256` matched its R2 key byte for byte, which is the identity claim in §4
+verified rather than argued.
 
-That last row matters more than it looks: `storeInbound` accepts the cap
-overflow list as an *input* rather than enforcing caps itself, so whatever
-becomes the handler has to call `applyCaps` or the caps do not exist.
+**That is not the same as being safe to deploy**, and three gaps matter more
+than the green rows above:
+
+1. **The never-throw path has never run.** `failed_ingest` is empty because
+   nothing has failed — so the recovery guarantee, the single most important
+   property in §7.4, is verified only by tests. And **`replay` does not
+   exist**, so a dead letter today has no documented way to be drained.
+2. **No cap has ever been hit.** They are wired and unit-tested, but nothing
+   real has come close to 50 attachments or 20 MB.
+3. **There is no read side.** The archive can only be read with SQL. Nothing
+   here has been designed against the threats a reader introduces, and §4.2's
+   guidance on serving attachments is advice to a consumer who does not exist
+   yet.
+
+An earlier version of this table said the handler did not exist and that
+`applyCaps` was called by nothing. Both were true when written and are now
+false. A security document that lags the code is worse than none — the reader
+cannot tell which rows to trust — so this table is updated with the code, not
+after it.
 
 The rest of this section describes each decision and marks the ones that are
 still design only.
