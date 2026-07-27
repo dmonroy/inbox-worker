@@ -64,6 +64,17 @@ describe('argument parsing', () => {
     expect(() => parseArgs(['migrant', '--local'])).toThrow(/migrate/)
   })
 
+  test('`replay` says where replay went, not merely that it is unknown', () => {
+    // The design document promised `inbox-worker replay <key>` in three
+    // places, and it is not being built — the CLI has no bound parameters, so
+    // writing a stranger's message body into D1 through it would be string
+    // interpolation. Anyone following the old instructions lands here, and
+    // "Unknown command" would send them looking for a typo.
+    expect(() => parseArgs(['replay', 'raw/email/2026/07/abc'])).toThrow(
+      /cron trigger/i,
+    )
+  })
+
   test('an unknown flag is rejected rather than ignored', () => {
     // Silently ignoring `--dry-run` would run the migration for real.
     expect(() => parseArgs(['migrate', '--local', '--dry-run'])).toThrow(

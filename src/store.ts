@@ -363,9 +363,9 @@ function previewOf(text: string | undefined): string | null {
 
 /**
  * `first_seen` is the minimum and `last_seen` the maximum, rather than "leave
- * one, overwrite the other". Replay exists (`inbox-worker replay`), so a
- * message older than everything we hold will arrive after it, and a plain
- * assignment would move `first_seen` forwards in time.
+ * one, overwrite the other". Replay exists (`replay.ts`), so a message older
+ * than everything we hold will arrive after it, and a plain assignment would
+ * move `first_seen` forwards in time.
  *
  * `display_name` is last-non-null-wins: people rename themselves, and a
  * message that carries no name should not blank the one we have.

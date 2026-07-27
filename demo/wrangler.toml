@@ -25,6 +25,19 @@ database_id = "00000000-0000-0000-0000-000000000000"
 binding = "INBOX_BUCKET"
 bucket_name = "inbox-worker-demo"
 
+# Replay (§7.4). The email handler never throws: once the raw bytes are in R2
+# it records a `failed_ingest` row and returns success, because an exception in
+# an Email Worker is a permanent 521 and the sender never retries. This is what
+# drains that backlog — without it a failed message is kept forever and
+# delivered never.
+#
+# Ten minutes because the table is normally empty and each run is two queries
+# when it is. Shorten it if you would rather a backlog cleared faster; that
+# interval is the only lever, since the batch size per run is fixed by the
+# package against D1's per-invocation limits.
+[triggers]
+crons = ["*/10 * * * *"]
+
 [vars]
 # Optional. Every R2 key is written under this prefix, so one bucket can hold
 # several deployments without them colliding. A binding rather than config

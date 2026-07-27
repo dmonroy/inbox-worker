@@ -37,6 +37,22 @@ export const DEFAULT_BINDING = 'INBOX_DB'
 
 const USAGE = `Usage: inbox-worker migrate (--local | --remote) [--binding NAME] [-c PATH]`
 
+/**
+ * Replay is not a subcommand and will not become one.
+ *
+ * This CLI shells out to `wrangler d1 execute --command`, which takes SQL text
+ * and **no bound parameters**. Replaying a message writes a subject, a body, a
+ * display name and a filename that a stranger chose into a dozen rows, so a
+ * CLI implementation would have to interpolate attacker-controlled bytes into
+ * SQL — the thing `src/store.ts` uses `.bind()` everywhere to avoid.
+ */
+const REPLAY_MOVED =
+  `Replay is a cron trigger, not a command. Add one to wrangler.toml:\n\n` +
+  `  [triggers]\n` +
+  `  crons = ["*/10 * * * *"]\n\n` +
+  `The worker drains failed_ingest on its own from there — it needs the D1 ` +
+  `and R2 bindings and bound SQL parameters, and this CLI has neither.`
+
 export interface ExecResult {
   code: number
   stdout: string
@@ -48,6 +64,10 @@ export type Exec = (args: string[]) => Promise<ExecResult>
 export function parseArgs(argv: readonly string[]): CliOptions {
   const [command, ...rest] = argv
   if (command === undefined) throw new Error(USAGE)
+  // Answered by name, because the design document promised this command in
+  // three places and whoever types it is holding a dead letter. "Unknown
+  // command" would send them hunting for a typo that is not there.
+  if (command === 'replay') throw new Error(REPLAY_MOVED)
   if (command !== 'migrate') {
     throw new Error(`Unknown command '${command}'. Expected 'migrate'.`)
   }

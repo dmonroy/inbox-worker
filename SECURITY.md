@@ -89,7 +89,7 @@ A security document that overstates coverage is worse than none, so:
 | DMARC gate, read from raw bytes by authserv-id | `src/dmarc.ts` | implemented · **passing on real mail** |
 | Conversations: no-merge, DMARC-gated index writes | `src/conversations.ts` | implemented · **threading real replies** |
 | **Never-throw ingest and `failed_ingest`** | `src/handler.ts` | implemented, **never exercised in production** — see below |
-| **`replay` command** | — | **not implemented** |
+| **Replay: draining `failed_ingest`** | `src/replay.ts`, `src/ingest.ts` | implemented as a **cron handler, not a CLI command** — see below |
 | **Any read side** (API, UI, search, read state) | — | **not implemented** |
 
 **This has received real mail.** A demo deployment on a live zone has taken
@@ -101,10 +101,11 @@ verified rather than argued.
 **That is not the same as being safe to deploy**, and three gaps matter more
 than the green rows above:
 
-1. **The never-throw path has never run.** `failed_ingest` is empty because
-   nothing has failed — so the recovery guarantee, the single most important
-   property in §7.4, is verified only by tests. And **`replay` does not
-   exist**, so a dead letter today has no documented way to be drained.
+1. **The never-throw path has never run in production.** `failed_ingest` is
+   empty because nothing has failed — so the recovery guarantee, the single
+   most important property in §7.4, is verified only by tests. Replay now
+   exists and closes the second half of that gap, but it too has only ever run
+   against miniflare, and against failures a test manufactured.
 2. **No cap has ever been hit.** They are wired and unit-tested, but nothing
    real has come close to 50 attachments or 20 MB.
 3. **There is no read side.** The archive can only be read with SQL. Nothing
@@ -206,7 +207,8 @@ join against them missing one.
 
 ### The ingest path never throws
 
-*Design decided; the handler that must obey it is **not yet written**.*
+*Implemented (`src/handler.ts`, `src/ingest.ts`), including the replay that
+drains what it records (`src/replay.ts`). Never triggered by real mail.*
 
 An Email Worker has no transient-failure path. An unhandled exception makes
 Cloudflare return **521 after DATA — a permanent 5xx**. The sending server
@@ -224,8 +226,44 @@ delivered at all.
 The rule: **once the raw bytes are in R2, the handler always returns success.**
 Everything after that write is wrapped; a failure records a `failed_ingest` row
 naming the R2 key, the channel, the envelope target, the stage, and the error,
-and then returns normally. A `replay` command drains the backlog after the bug
-is fixed.
+and then returns normally.
+
+**The backlog is drained by a cron trigger, not by a CLI command.** The design
+document asks for `inbox-worker replay <key>`, and that command cannot be
+written safely. The CLI shells out to `wrangler d1 execute --command`, one
+statement at a time, with **no bound parameters** — and replaying a message
+means writing a subject, a body, a display name and a filename that a stranger
+chose into a dozen rows. Building that SQL by string interpolation from
+attacker-controlled bytes is an injection hole into the archive, and it is
+precisely why every statement in `src/store.ts` uses `.bind()`. A second
+implementation of every write, running rarely, is also the one that drifts from
+the schema.
+
+So `scheduled()` does it instead: the same `runPipeline` live ingest uses, in
+the worker, with the real D1 and R2 bindings. No public endpoint, no
+authentication code, and no API token — an authenticated admin endpoint was
+considered and rejected on the same grounds §2.1 rejected an unauthenticated
+one, with the extra objection that it would be the first credential-checking
+code in a repository that currently has none to get wrong.
+
+What that costs the operator is a `[triggers]` line in `wrangler.toml`. **A
+deployment without one is safe but never recovers**: messages are kept and
+never delivered.
+
+Three properties of the drain matter for the threat model:
+
+- **Bounded.** Ten rows per run. Draining an unbounded backlog in one
+  invocation exceeds D1's per-invocation query limit and fails as a whole,
+  every time — a dead letter that can never be drained, which is the same trap
+  §8 avoided by refusing to merge conversations. Anyone who can send mail can
+  also fill this table, so the bound is not a nicety.
+- **Attempt-capped.** A row that fails ten times is *parked*: skipped, and
+  never deleted, because it is the only pointer to the raw object. A crafted
+  message that fails deterministically therefore cannot occupy a slot in every
+  future batch ahead of messages that would succeed.
+- **Routing is re-resolved, not restored.** The row records the envelope
+  address, and the drain resolves it against the config as it is now. Nothing
+  in the row names an inbox, so nothing an attacker wrote can select one.
 
 Two consequences worth stating:
 

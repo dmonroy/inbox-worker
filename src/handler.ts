@@ -15,8 +15,9 @@
  * that breaks the parser and you drop a thread, repeatably, for free.
  *
  * So everything after the R2 write is wrapped, and a failure writes a
- * `failed_ingest` row and returns normally. The raw object is the message;
- * `inbox-worker replay` drains the backlog once the bug is fixed.
+ * `failed_ingest` row and returns normally. The raw object is the message, and
+ * `scheduled()` — a cron trigger, not the CLI command DESIGN sketched — drains
+ * the backlog once the bug is fixed. See `replay.ts` for why.
  *
  * Two things sit deliberately *outside* that guarantee, and both are cases
  * where returning success would mean discarding mail with no record of it:
@@ -30,14 +31,12 @@
  *   throw: the bytes still reach R2, which is the whole point of the ordering.
  */
 
-import { applyCaps, DEFAULT_CAPS } from './caps.js'
 import { resolveConfig } from './config.js'
-import { resolveConversation } from './conversations.js'
-import { dmarcPassed } from './dmarc.js'
 import { sha256Hex } from './identity.js'
-import { parseEmail } from './mime.js'
+import { deliveryOf, describeError, runPipeline, type Stage } from './ingest.js'
+import { replayFailed } from './replay.js'
 import { resolveTarget } from './resolve.js'
-import { putRaw, type StoredRaw, type StoreEnv, storeInbound } from './store.js'
+import { putRaw, type StoredRaw, type StoreEnv } from './store.js'
 import type { EmailChannel, InboxConfig, ResolvedConfig } from './types.js'
 
 const enc = new TextEncoder()
@@ -63,6 +62,16 @@ export interface Handlers {
     env: Env,
     ctx: ExecutionContext,
   ): Promise<void>
+  /**
+   * Drains `failed_ingest` (§7.4). Needs a cron trigger in the consumer's
+   * `wrangler.toml`; without one it is simply never called and the backlog
+   * keeps accumulating, which is the state before this existed.
+   */
+  scheduled(
+    controller: ScheduledController,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void>
 }
 
 /**
@@ -85,6 +94,7 @@ export function handlers(config: InboxConfig): Handlers {
 
   return {
     email: (message, env, _ctx) => handleEmail(resolved, channel, message, env),
+    scheduled: (_controller, env, _ctx) => drain(resolved, channel, env),
   }
 }
 
@@ -97,7 +107,37 @@ export function handlers(config: InboxConfig): Handlers {
  * the first webhook channel does.
  */
 export function inbox(config: InboxConfig): ExportedHandler<Env> {
-  return { email: handlers(config).email }
+  const { email, scheduled } = handlers(config)
+  return { email, scheduled }
+}
+
+/**
+ * The cron entry point (§7.4).
+ *
+ * **This never throws either**, for a different reason than ingest does: a
+ * scheduled invocation that throws is recorded as a failed cron run and
+ * nothing else happens, so propagating would trade a log line an operator can
+ * read for one they have to go looking for. Everything that could fail here —
+ * an unmigrated database, a missing binding — is a deployment problem, and the
+ * message it concerns is still safe in R2 either way.
+ */
+async function drain(
+  config: ResolvedConfig,
+  channel: EmailChannel,
+  env: Env,
+): Promise<void> {
+  try {
+    const report = await replayFailed(config, channel, storeEnv(env))
+
+    if (report.attempted > 0 || report.parked > 0) {
+      console.log(
+        `inbox-worker: replayed ${report.replayed} of ${report.attempted}, ` +
+          `${report.failed} failed again, ${report.parked} parked.`,
+      )
+    }
+  } catch (error) {
+    console.error(`inbox-worker: replay run failed: ${describeError(error)}`)
+  }
 }
 
 async function handleEmail(
@@ -143,65 +183,24 @@ async function handleEmail(
     receivedAt,
   })
 
-  // From here on, nothing throws.
-  let stage: Stage = 'parse'
-  try {
-    // The two parser caps have to be set before parsing to mean anything, and
-    // they *throw* — which is the case this whole `try` exists for (§5).
-    const parsed = await parseEmail(bytes, {
-      target: resolution.target,
-      receivedAt,
-      caps: DEFAULT_CAPS,
-    })
+  // From here on, nothing throws — `runPipeline` returns its failures.
+  const outcome = await runPipeline(store, channel, {
+    bytes,
+    raw,
+    delivery: deliveryOf(resolution),
+    receivedAt,
+  })
 
-    stage = 'caps'
-    // Nothing else calls this. `storeInbound` takes the overflow list as an
-    // input and bounds no row counts of its own, so without this line the
-    // post-parse caps do not exist and one crafted message with ten thousand
-    // MIME parts is ten thousand R2 puts and ten thousand D1 rows (§5).
-    const { message: capped, overflows } = applyCaps(parsed, DEFAULT_CAPS)
-
-    // Read from the raw bytes, not from `message.headers`: a sender writes
-    // `Authentication-Results` too, and `Headers.get()` joins the forgery onto
-    // the edge's genuine result with no way to tell them apart. See `dmarc.ts`.
-    const verified = dmarcPassed(bytes, channel.authservId)
-
-    stage = 'conversation'
-    // Before storage, and after the caps: `messages.conversation_id` is a
-    // foreign key that D1 enforces (§9.0), so the parent row has to exist
-    // first — and the candidate ids come from `meta.references`, which the
-    // caps have just trimmed to the last 20.
-    const { conversationId } = await resolveConversation(store.db, {
-      message: capped,
-      inboxKey: resolution.inboxKey,
-      verified,
-    })
-
-    stage = 'store'
-    await storeInbound(store, {
-      message: capped,
-      inboxKey: resolution.inboxKey,
-      conversationId,
-      verified,
-      overflows,
-      raw,
-      ...(resolution.status === 'matched' && resolution.tag !== undefined
-        ? { tag: resolution.tag }
-        : {}),
-    })
-  } catch (error) {
+  if (!outcome.ok) {
     await deadLetter(store.db, {
       raw,
       target: resolution.target,
-      stage,
-      error,
+      stage: outcome.stage,
+      error: outcome.error,
       at: receivedAt,
     })
   }
 }
-
-/** Where ingest got to. Recorded so a replay knows what to retry. */
-type Stage = 'parse' | 'caps' | 'conversation' | 'store'
 
 interface Failure {
   raw: StoredRaw
@@ -259,20 +258,6 @@ async function deadLetter(db: D1Database, failure: Failure): Promise<void> {
       `inbox-worker: could not record the failure for ${raw.key}: ${describeError(error)}`,
     )
   }
-}
-
-/**
- * Name and message, bounded. No stack: this is a bundled worker, so the frames
- * are noise, and the row is read by an operator rather than a debugger.
- *
- * Bounded because the text can contain whatever the sender sent — a parser
- * quoting a hostile header into its own message is ordinary — and an
- * unbounded attacker-authored string is a row nobody can list.
- */
-function describeError(error: unknown): string {
-  const text =
-    error instanceof Error ? `${error.name}: ${error.message}` : String(error)
-  return text.length > 1000 ? `${text.slice(0, 1000)}…` : text
 }
 
 function storeEnv(env: Env): StoreEnv {
