@@ -8,10 +8,12 @@ import { env } from 'cloudflare:test'
 import { beforeEach, describe, expect, test } from 'vitest'
 import {
   CODE_SCHEMA_VERSION,
+  isTolerant,
   MIGRATIONS,
   type Migration,
   migrate,
   schemaVersion,
+  sqlOf,
 } from '../../src/migrations'
 
 const db = () => env.INBOX_DB
@@ -123,10 +125,15 @@ describe('running it again', () => {
     // per statement with no transaction across them, so a run that dies
     // halfway has to be repairable by running it again. That is only true if
     // every statement is safe to re-run.
+    //
+    // Bare re-execution is the right test only while every statement is a
+    // plain string. A tolerant one is re-runnable *through the driver*, which
+    // is what swallows its error — see 'a statement marked tolerant' below.
     await migrate(db())
 
-    for (const sql of MIGRATIONS[0]?.statements ?? []) {
-      await db().prepare(sql).run()
+    for (const statement of MIGRATIONS[0]?.statements ?? []) {
+      expect(isTolerant(statement)).toBe(false)
+      await db().prepare(sqlOf(statement)).run()
     }
 
     expect(await schemaVersion(db())).toBe(1)
@@ -138,8 +145,8 @@ describe('a partially applied migration', () => {
     // Simulates the CLI dying between statements: the schema is half there and
     // the version was never written, because the version write is last.
     const partial = MIGRATIONS[0]?.statements.slice(0, 3) ?? []
-    for (const sql of partial) {
-      await db().prepare(sql).run()
+    for (const statement of partial) {
+      await db().prepare(sqlOf(statement)).run()
     }
     expect(await schemaVersion(db())).toBe(0)
 
@@ -204,6 +211,144 @@ describe('version ordering', () => {
   })
 })
 
+describe('a statement marked tolerant', () => {
+  /**
+   * The shape §15.1 exists for: `ALTER TABLE … ADD COLUMN`, which SQLite has
+   * no `IF NOT EXISTS` for, so it is the one statement that cannot be made
+   * re-runnable by writing it more carefully.
+   */
+  const adding = (sql: string): Migration => ({
+    version: 1,
+    name: 'tolerant',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS probe (x TEXT)`,
+      { sql, tolerate: 'duplicate-column' },
+    ],
+  })
+
+  const addsColumn = adding(`ALTER TABLE probe ADD COLUMN sniffed_type TEXT`)
+
+  const columns = async (table: string): Promise<string[]> => {
+    const { results } = await db()
+      .prepare(`SELECT name FROM pragma_table_info(?) ORDER BY name`)
+      .bind(table)
+      .all<{ name: string }>()
+    return results.map((r) => r.name)
+  }
+
+  test('an interrupted run is repaired by running it again', async () => {
+    // The whole point of the mechanism, and the promise README makes: a run
+    // that dies between statements left the schema half-applied and the
+    // version unwritten, so the repair is to run the same thing again. Without
+    // tolerance the re-run dies on the ALTER — and dies *every* time, so the
+    // migration can never be recorded and the database is stuck.
+    for (const statement of addsColumn.statements) {
+      await db().prepare(sqlOf(statement)).run()
+    }
+    expect(await schemaVersion(db())).toBe(0)
+
+    const { applied } = await migrate(db(), [addsColumn])
+
+    expect(applied).toEqual([1])
+    expect(await schemaVersion(db())).toBe(1)
+    expect(await columns('probe')).toEqual(['sniffed_type', 'x'])
+  })
+
+  test('applying it a second time leaves one column, not two', async () => {
+    // Tolerating the error must mean the column is already there — not that
+    // the ALTER half-ran. If a re-run could duplicate or clobber the column,
+    // swallowing the error would be hiding data loss rather than a no-op.
+    await migrate(db(), [addsColumn])
+    await migrate(db(), [{ ...addsColumn, version: 2 }])
+
+    expect(await columns('probe')).toEqual(['sniffed_type', 'x'])
+    expect(await schemaVersion(db())).toBe(2)
+  })
+
+  test('a failure that is not duplicate-column still propagates', async () => {
+    // `tolerate` is a closed union rather than a boolean precisely so this
+    // stays loud. A typo'd table name that got swallowed would let the version
+    // be written for a schema that was never applied — the exact half-migrated
+    // state the re-run promise is supposed to rule out.
+    const typo = adding(`ALTER TABLE prboe ADD COLUMN sniffed_type TEXT`)
+
+    await expect(migrate(db(), [typo])).rejects.toThrow(/no such table/)
+    expect(await schemaVersion(db())).toBe(0)
+  })
+
+  test('earlier statements survive a later failure, because it is not a batch', async () => {
+    // A tolerant migration cannot run in `batch()` — a transaction has no way
+    // to express a swallowed error — so it runs sequentially and there is no
+    // rollback. That is safe only because every statement is idempotent, and
+    // this is the test that notices if someone puts it back in a batch and
+    // gets rollback semantics it cannot honour.
+    const typo = adding(`ALTER TABLE prboe ADD COLUMN sniffed_type TEXT`)
+
+    await expect(migrate(db(), [typo])).rejects.toThrow()
+
+    expect(await tables()).toContain('probe')
+  })
+})
+
+describe('which driver a migration takes', () => {
+  /** Only `prepare` and `batch` are used, so this is the whole surface. */
+  const counting = (): { db: D1Database; batches: () => number } => {
+    let batches = 0
+    const spy = {
+      prepare: (sql: string) => db().prepare(sql),
+      batch: (statements: D1PreparedStatement[]) => {
+        batches++
+        return db().batch(statements)
+      },
+    } as unknown as D1Database
+    return { db: spy, batches: () => batches }
+  }
+
+  const plain: Migration = {
+    version: 1,
+    name: 'plain',
+    statements: [
+      `CREATE TABLE IF NOT EXISTS probe (x TEXT)`,
+      `CREATE INDEX IF NOT EXISTS idx_probe ON probe(x)`,
+    ],
+  }
+
+  test('a migration of plain statements still goes through batch()', async () => {
+    // Sequential is only *required* where a statement is tolerant. Everything
+    // else keeps the transaction and the single round trip it already had —
+    // making every migration sequential would be a silent regression, both in
+    // speed and in atomicity.
+    const { db: spy, batches } = counting()
+
+    await migrate(spy, [plain])
+
+    expect(batches()).toBe(1)
+  })
+
+  test('one tolerant statement moves the whole migration off batch()', async () => {
+    // Not just the tolerant statement: `batch()` aborts the entire sequence on
+    // any error, so a batch that a tolerant statement sits in cannot swallow
+    // anything. The unit of choice is the migration.
+    const { db: spy, batches } = counting()
+
+    await migrate(spy, [
+      {
+        version: 1,
+        name: 'mixed',
+        statements: [
+          `CREATE TABLE IF NOT EXISTS probe (x TEXT)`,
+          {
+            sql: `ALTER TABLE probe ADD COLUMN y TEXT`,
+            tolerate: 'duplicate-column',
+          },
+        ],
+      },
+    ])
+
+    expect(batches()).toBe(0)
+  })
+})
+
 describe('the statements are not splittable text', () => {
   test('every statement is a single statement', () => {
     // D1's exec() splits on newlines and gets it wrong — a multi-line CREATE
@@ -211,8 +356,8 @@ describe('the statements are not splittable text', () => {
     // reproduced against local D1. We never hand D1 splittable text, so a
     // stray semicolon that turns one entry into two must not creep in.
     for (const migration of MIGRATIONS) {
-      for (const sql of migration.statements) {
-        expect(sql.replace(/;\s*$/, '')).not.toContain(';')
+      for (const statement of migration.statements) {
+        expect(sqlOf(statement).replace(/;\s*$/, '')).not.toContain(';')
       }
     }
   })

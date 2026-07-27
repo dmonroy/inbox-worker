@@ -19,6 +19,9 @@ import {
   META_STATEMENT,
   MIGRATIONS,
   type Migration,
+  reportsDuplicateColumn,
+  type Statement,
+  sqlOf,
   versionStatement,
 } from './migrations.js'
 
@@ -150,7 +153,8 @@ function extractJson(stdout: string): any {
 export interface PlannedMigration {
   version: number
   name: string
-  statements: string[]
+  /** Tolerant statements stay tolerant: the CLI is the driver that runs them. */
+  statements: Statement[]
 }
 
 /**
@@ -188,11 +192,12 @@ export async function runMigrate(
   opts: CliOptions,
   exec: Exec,
   log: (line: string) => void = console.log,
+  migrations: readonly Migration[] = MIGRATIONS,
 ): Promise<number> {
   const probe = await exec(wranglerArgs(VERSION_QUERY, opts))
   const current = parseVersion(probe.stdout)
 
-  const pending = plan(current, MIGRATIONS)
+  const pending = plan(current, migrations)
   if (pending.length === 0) {
     log(`Schema is at version ${current}. Nothing to apply.`)
     return 0
@@ -201,9 +206,10 @@ export async function runMigrate(
   for (const migration of pending) {
     log(`Applying ${migration.version} (${migration.name})…`)
 
-    for (const sql of migration.statements) {
-      const result = await exec(wranglerArgs(sql, opts))
+    for (const statement of migration.statements) {
+      const result = await exec(wranglerArgs(sqlOf(statement), opts))
       if (result.code !== 0) {
+        if (tolerated(statement, result)) continue
         // Stop here rather than pressing on. The version was not written, so
         // re-running repairs it; continuing past a failure would write a
         // version for a schema that was never fully applied.
@@ -219,6 +225,27 @@ export async function runMigrate(
 
   log(`Schema is at version ${pending.at(-1)?.version}.`)
   return 0
+}
+
+/**
+ * Whether a non-zero wrangler run is the one failure this statement asked to
+ * tolerate (§15.1).
+ *
+ * Matched against **stderr only**, which is where a spike measured it:
+ * `✘ [ERROR] duplicate column name: c: SQLITE_ERROR`, exit code 1, stdout
+ * carrying only the banner. Looking at stdout as well would widen the match
+ * for no measured reason, and the safe direction to be wrong in is the loud
+ * one — a matcher that stops matching fails the migration visibly, whereas one
+ * that matches too much records a version for a schema that was never applied.
+ */
+function tolerated(statement: Statement, result: ExecResult): boolean {
+  if (typeof statement === 'string') return false
+  // Switched on rather than treated as "tolerant at all", so a second member
+  // of the union cannot inherit this matcher without being written down here.
+  if (statement.tolerate === 'duplicate-column') {
+    return reportsDuplicateColumn(result.stderr)
+  }
+  return false
 }
 
 const execWrangler: Exec = (args) =>

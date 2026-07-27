@@ -12,11 +12,27 @@
 const META_TABLE = '_inbox_meta'
 const VERSION_KEY = 'schema_version'
 
+/**
+ * A statement, and the one escape hatch from "safe to re-run" (§15.1).
+ *
+ * Almost everything is a plain string made re-runnable by `IF NOT EXISTS`.
+ * `ALTER TABLE … ADD COLUMN` is the exception SQLite gives no `IF NOT EXISTS`
+ * for, so it says instead which failure it expects on a second run.
+ *
+ * `tolerate` is a closed union rather than a boolean on purpose. `true` would
+ * swallow a typo'd table name as readily as a duplicate column, and the
+ * version would still be written — a schema recorded as migrated that never
+ * was. Naming the failure means anything else stays loud.
+ */
+export type Statement = string | { sql: string; tolerate: 'duplicate-column' }
+
 export interface Migration {
   version: number
   name: string
   /**
-   * DDL, in order. **Every statement must be safe to re-run.**
+   * DDL, in order. **Every statement must be safe to re-run** — a plain string
+   * by being idempotent, a tolerant one by naming what it expects to fail
+   * with. See `Statement`.
    *
    * The CLI applies these one `wrangler d1 execute --command` at a time, one
    * process per statement, so there is no transaction spanning them. Rather
@@ -27,7 +43,56 @@ export interface Migration {
    * measured, not assumed: a multi-line `CREATE TABLE` fails with
    * `incomplete input`, reproducing workers-sdk#9133 exactly.
    */
-  statements: string[]
+  statements: Statement[]
+}
+
+/**
+ * SQLite's own words for the one failure a tolerant statement may swallow.
+ *
+ * Measured, not assumed, against local D1 — and against `wrangler d1 execute`,
+ * because the two drivers surface it differently and the matcher has to serve
+ * both:
+ *
+ * - binding: a plain `Error`, own properties `stack`/`message`/`cause` and
+ *   **nothing structured** — no `code`, no `errno`. `message` is
+ *   `D1_ERROR: duplicate column name: sniffed_type: SQLITE_ERROR`, and `cause`
+ *   is an `Error` carrying the same text without the `D1_ERROR:` prefix.
+ * - wrangler: exit code 1, stderr `✘ [ERROR] duplicate column name:
+ *   sniffed_type: SQLITE_ERROR`, no `D1_ERROR:` prefix at all.
+ *
+ * So SQLite's text is the only thing both agree on, which is why the matcher
+ * keys on the text and not on the wrapper. It is specific: of every failure
+ * spiked — `no such table`, `no such column`, `near "…": syntax error`,
+ * `UNIQUE constraint failed`, `Cannot add a column to a view` — none contains
+ * this phrase. `no such column` is the nearest miss, which is why the whole
+ * phrase is required rather than something looser about columns.
+ */
+const DUPLICATE_COLUMN = 'duplicate column name:'
+
+/**
+ * Whether some text D1 produced is reporting a duplicate column.
+ *
+ * Takes text rather than an error because the CLI driver has no error to
+ * inspect — it has an exit code and a stderr buffer. One phrase, one place,
+ * two drivers.
+ */
+export function reportsDuplicateColumn(text: string): boolean {
+  return text.includes(DUPLICATE_COLUMN)
+}
+
+/** True only for the duplicate-column failure. See `DUPLICATE_COLUMN`. */
+export function isDuplicateColumnError(error: unknown): boolean {
+  return messagesOf(error).some(reportsDuplicateColumn)
+}
+
+/**
+ * Both the wrapper's message and its `cause`'s, because only one of them is
+ * guaranteed to survive: the prefix is D1's, the text underneath is SQLite's,
+ * and which layer a future runtime hands over is not ours to decide.
+ */
+function messagesOf(error: unknown): string[] {
+  if (!(error instanceof Error)) return []
+  return [error.message, ...messagesOf(error.cause)]
 }
 
 /**
@@ -213,6 +278,40 @@ export function versionStatement(version: number): string {
           ON CONFLICT(key) DO UPDATE SET value = excluded.value`
 }
 
+/** The SQL, whichever of the two forms a statement takes. */
+export function sqlOf(statement: Statement): string {
+  return typeof statement === 'string' ? statement : statement.sql
+}
+
+/** A statement is tolerant exactly when it is not a bare string. */
+export function isTolerant(statement: Statement): boolean {
+  return typeof statement !== 'string'
+}
+
+/**
+ * One statement, on its own, swallowing its failure only if the statement
+ * asked to tolerate it *and* the failure is the one it named.
+ *
+ * A plain string never swallows anything, so the escape hatch is opt-in per
+ * statement and visible at the call site rather than a mode the whole
+ * migration runs in.
+ *
+ * Switching on `tolerate` rather than on "is it tolerant" is what keeps a
+ * second member of the union from silently inheriting the duplicate-column
+ * matcher: an unrecognised one falls through and throws.
+ */
+async function apply(db: D1Database, statement: Statement): Promise<void> {
+  try {
+    await db.prepare(sqlOf(statement)).run()
+  } catch (error) {
+    if (typeof statement === 'string') throw error
+    if (statement.tolerate === 'duplicate-column') {
+      if (isDuplicateColumnError(error)) return
+    }
+    throw error
+  }
+}
+
 /**
  * Read the applied schema version. `0` means nothing has been applied — which
  * is also what a database with no `_inbox_meta` table reports, since the
@@ -269,7 +368,21 @@ export async function migrate(
     // miniflare, not production D1, and the version write has to be last on
     // the CLI path regardless. Splitting costs one round trip and makes both
     // drivers behave the same way.
-    await db.batch(migration.statements.map((sql) => db.prepare(sql)))
+    if (migration.statements.some(isTolerant)) {
+      // Sequentially, because `batch()` is a transaction and a transaction has
+      // no way to express a swallowed error (§15.1). The unit is the whole
+      // migration rather than the one statement: an abort rolls back the
+      // entire sequence, so a tolerant statement anywhere in a batch makes the
+      // batch unable to tolerate it. The cost is round trips and the loss of
+      // rollback, and the second is only affordable because every statement is
+      // safe to re-run — see `Migration.statements`.
+      for (const statement of migration.statements) {
+        await apply(db, statement)
+      }
+    } else {
+      await db.batch(migration.statements.map((s) => db.prepare(sqlOf(s))))
+    }
+
     await db.prepare(versionStatement(migration.version)).run()
 
     applied.push(migration.version)
