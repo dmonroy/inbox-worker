@@ -144,6 +144,37 @@ export const REPLY_WITH_REFERENCES = mail(
   'Sending it over.\r\n',
 )
 
+/**
+ * A body well past the 512 KB inline limit, so it has to spill to R2 (§5).
+ *
+ * Generated rather than written out. Committing 600 KB of filler to a public
+ * repo to assert one boolean is not a trade worth making, and a fixture whose
+ * size is the whole point should state that size in code where it cannot drift
+ * away from the limit it is testing.
+ */
+export const OVERSIZED_BODY = mail(
+  [
+    'From: ada@example.com',
+    'To: sales@example.org',
+    'Subject: Log dump',
+    'Message-ID: <oversized-1@example.com>',
+  ],
+  `${'Lorem ipsum dolor sit amet. '.repeat(24_000)}\r\n`,
+)
+
+/**
+ * No `From` header at all. The sender cannot be determined, and inventing a
+ * placeholder contact would collect every such message under one identity.
+ */
+export const NO_FROM = mail(
+  [
+    'To: sales@example.org',
+    'Subject: Anonymous sender',
+    'Message-ID: <no-from-1@example.com>',
+  ],
+  'Who sent this?\r\n',
+)
+
 export const NO_MESSAGE_ID = mail(
   ['From: ada@example.com', 'To: sales@example.org', 'Subject: Anonymous'],
   'No id here.\r\n',

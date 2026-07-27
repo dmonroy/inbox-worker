@@ -122,17 +122,33 @@ export const MIGRATIONS: Migration[] = [
          ON messages(conversation_id, received_at)`,
       `CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content_id)`,
 
+      // The primary key is the dedup key (§9.1). Without it, fan-out — two
+      // envelope recipients deriving the *same* content_id, which is the whole
+      // point of content addressing — appended a second full set of
+      // participants to the same content, as did every retry.
+      //
+      // Keying on the natural triple means a header naming one address twice
+      // in `To:` collapses to one row, and if that address arrives with two
+      // display names one wins arbitrarily. Acceptable: `name` is cosmetic and
+      // never a key (§3.1).
+      //
+      // No separate index on `content_id`: the composite key's own index
+      // already leads with it, so one would only cost writes.
       `CREATE TABLE IF NOT EXISTS participants (
          content_id TEXT NOT NULL REFERENCES contents(id),
          role       TEXT NOT NULL,
          identifier TEXT NOT NULL,
-         name       TEXT
+         name       TEXT,
+         PRIMARY KEY (content_id, role, identifier)
        )`,
-      `CREATE INDEX IF NOT EXISTS idx_participants_content
-         ON participants(content_id)`,
       `CREATE INDEX IF NOT EXISTS idx_participants_ident
          ON participants(identifier)`,
 
+      // `id` is sha256(content_id + ':' + part_index) — see §9.1 and `store.ts`.
+      // Part index rather than a hash of the bytes, because the same file
+      // attached twice must stay two rows; hashing would silently collapse
+      // them. Part order is deterministic for the same bytes, which is the
+      // guarantee content addressing already rests on.
       `CREATE TABLE IF NOT EXISTS attachments (
          id         TEXT PRIMARY KEY,
          content_id TEXT NOT NULL REFERENCES contents(id),

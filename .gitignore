@@ -25,3 +25,7 @@ npm-debug.log*
 .idea/
 .vscode/
 *.swp
+
+# Agent worktrees. Never committed, and a nested copy of biome.json inside
+# one makes `biome check` refuse to run at all.
+.claude/worktrees/
