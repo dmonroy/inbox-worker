@@ -148,8 +148,15 @@ already safe in R2 — by design, the handler never throws on the mail path:
 
 ```sh
 npx wrangler d1 execute INBOX_DB --remote --command \
-  "SELECT stage, error, raw_r2_key FROM failed_ingest ORDER BY last_seen DESC"
+  "SELECT stage, attempts, error, raw_r2_key FROM failed_ingest ORDER BY last_seen DESC"
 ```
+
+Those rows drain themselves. `wrangler.toml` has a cron trigger every ten
+minutes, and each run re-reads the raw bytes from R2 and puts them back through
+the same pipeline — so once you have fixed whatever broke, the message arrives
+on its own and the row disappears. A row still there after twenty minutes is
+failing for a reason the fix did not cover; `attempts` counts how many times,
+and at ten it stops being retried and waits for you.
 
 The raw `.eml` is in R2 under `demo/raw/email/…` — the `demo/` comes from
 `INBOX_PREFIX` in `wrangler.toml`, which exists so several deployments can
