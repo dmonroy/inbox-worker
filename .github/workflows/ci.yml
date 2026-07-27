@@ -29,6 +29,10 @@ jobs:
       # package.json and the lockfile have drifted apart.
       - run: npm ci
 
+      # The same check the pre-commit hook runs. The hook is bypassable, so
+      # this is where formatting and lint are actually enforced.
+      - run: npm run check
+
       - run: npm run typecheck
 
       - run: npm test

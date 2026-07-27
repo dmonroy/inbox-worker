@@ -15,7 +15,9 @@ describe('parseAddress', () => {
   })
 
   test('keeps the address as received', () => {
-    expect(parseAddress('  Darwin@Example.COM  ')?.raw).toBe('Darwin@Example.COM')
+    expect(parseAddress('  Darwin@Example.COM  ')?.raw).toBe(
+      'Darwin@Example.COM',
+    )
   })
 
   test('extracts a plus-tag and excludes it from the key', () => {

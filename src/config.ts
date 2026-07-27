@@ -8,24 +8,24 @@
  * could not express.
  */
 
-import { validate } from './validate'
 import {
-  QUARANTINE,
   type EmailChannel,
   type InboxConfig,
   type InboxDef,
   type MemberInbox,
+  QUARANTINE,
   type ResolvedConfig,
   type TeamInbox,
 } from './types'
+import { validate } from './validate'
 
 export {
-  QUARANTINE,
   type Channel,
   type EmailChannel,
   type InboxConfig,
   type InboxDef,
   type MemberInbox,
+  QUARANTINE,
   type ResolvedConfig,
   type TeamInbox,
 } from './types'

@@ -4,11 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
+    "check": "biome check",
+    "fix": "biome check --write",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.5",
     "typescript": "^5.7.3",
     "vitest": "^2.1.8"
   }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { Email, Member, QUARANTINE, Team, inbox } from '../src/config'
+import { Email, inbox, Member, QUARANTINE, Team } from '../src/config'
 
 const channels = [Email({ domain: 'mycompany.com' })]
 
@@ -79,7 +79,10 @@ describe('inbox()', () => {
     // is right — unlike a malformed message, which is a routing decision.
     // Reporting all of them beats fixing one typo per deploy.
     expect(() =>
-      inbox({ inboxes: { Sales: Team('Sales'), 'bad key': Team('Bad') }, channels }),
+      inbox({
+        inboxes: { Sales: Team('Sales'), 'bad key': Team('Bad') },
+        channels,
+      }),
     ).toThrow(/Sales[\s\S]*bad key/)
   })
 
