@@ -1,0 +1,16 @@
+{
+  "//": [
+    "SPIKE. `spike/fanout` is a branch that never merges.",
+    "",
+    "The root tsconfig includes only `src` and `test`, so `npm run typecheck`",
+    "does not see this directory and the spike cannot break it. That is the",
+    "point — but it also means nothing checks the spike unless you ask:",
+    "",
+    "    npx tsc -p spikes/fanout",
+    "",
+    "Run that after editing index.ts. A spike that does not compile is an",
+    "afternoon lost at exactly the moment the domain finally exists."
+  ],
+  "extends": "../../tsconfig.json",
+  "include": ["index.ts", "../../src"]
+}

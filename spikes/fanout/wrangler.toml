@@ -1,0 +1,43 @@
+# SPIKE. Deployed by hand to a throwaway zone, run once, deleted.
+# `spike/fanout` is a branch that never merges. See RUNBOOK.md.
+#
+# The package itself is a library and deliberately has no wrangler.toml
+# (see the comment at the top of vitest.config.ts). This one belongs to the
+# spike only, is never referenced by the build, the tests, or CI, and must not
+# be taken as a template for what a consumer deploys.
+#
+#   npx wrangler deploy   -c spikes/fanout/wrangler.toml
+#   npx wrangler tail     -c spikes/fanout/wrangler.toml --format json
+#   npx wrangler delete   -c spikes/fanout/wrangler.toml
+
+name = "inbox-fanout-spike"
+main = "index.ts"
+compatibility_date = "2026-07-01"
+
+# Only so `process.memoryUsage()` exists to be probed. It returns zeros — see
+# `memoryProbe()` in index.ts — but probing and reporting "no reading" is the
+# honest form of the answer, and this costs nothing.
+compatibility_flags = ["nodejs_compat"]
+
+# Structured logs, retained, so the run survives closing the terminal.
+# `wrangler tail` is the live channel; this is the one you can go back to.
+[observability]
+enabled = true
+
+[vars]
+# Megabytes of scratch memory held alongside the buffered message, standing in
+# for the `postal-mime` allocation this spike does not make. Raise it across
+# redeploys to find the headroom on a 25 MB message (§5). "0" measures nothing
+# and is the right value for the first run.
+BALLAST_MB = "0"
+
+# Optional but strongly recommended, and the only channel that can carry a
+# 25 MB message: with a bucket bound, each invocation archives its raw bytes,
+# so byte-identity is settled by `cmp` on two files rather than by trusting a
+# hash printed in a log. Create the bucket, then uncomment:
+#
+#   npx wrangler r2 bucket create inbox-fanout-spike
+#
+# [[r2_buckets]]
+# binding = "SPIKE_BUCKET"
+# bucket_name = "inbox-fanout-spike"
