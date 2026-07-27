@@ -48,6 +48,9 @@ the message, and an unknown address is not a good enough reason for that. Mail
 for a domain no channel declares *is* refused, because that means a zone is
 pointed here by mistake.
 
+[`demo/`](demo) is that worker, deployable: three inboxes, one channel, and a
+README that goes from an empty account to receiving mail.
+
 If you already export a worker of your own, `handlers(config)` gives you the
 same `email` handler to mount inside it. Set `INBOX_PREFIX` to scope R2 keys
 when two deployments share one bucket.

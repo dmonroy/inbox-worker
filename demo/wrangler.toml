@@ -1,0 +1,32 @@
+# Deployment config for the demo worker.
+#
+# REPLACE BEFORE DEPLOYING:
+#   - `database_id` below — the uuid `wrangler d1 create` prints. The value
+#     here is a placeholder and will fail against a real account.
+#   - the domain in `src/index.ts` — a zone you own, with Email Routing on.
+#
+# `name`, `database_name` and `bucket_name` are free to keep as they are; they
+# only have to match what you actually created.
+
+name = "inbox-worker-demo"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+
+# The two bindings the package resolves by name (§2.7). Renaming either one
+# means the worker cannot find it — there is no fallback and no search.
+
+[[d1_databases]]
+binding = "INBOX_DB"
+database_name = "inbox-worker-demo"
+# Placeholder. `wrangler d1 create inbox-worker-demo` prints the real one.
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[r2_buckets]]
+binding = "INBOX_BUCKET"
+bucket_name = "inbox-worker-demo"
+
+[vars]
+# Optional. Every R2 key is written under this prefix, so one bucket can hold
+# several deployments without them colliding. A binding rather than config
+# because staging and production run the same `src/index.ts`.
+INBOX_PREFIX = "demo/"

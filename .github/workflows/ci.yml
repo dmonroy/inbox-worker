@@ -107,6 +107,31 @@ jobs:
             await import('inbox-worker/testing')
           "
 
+      # `demo/` is the first real consumer, and the only place the
+      # consumer-facing API is exercised the way a consumer exercises it. The
+      # step above proves the `exports` map resolves; it imports and stops. It
+      # cannot catch a `Team()` signature that changed, a binding the README
+      # still names wrongly, or an import workerd's bundler cannot follow but
+      # node can.
+      #
+      # Every command here is offline: no account, no `wrangler login`, no
+      # secrets, which is what makes it safe on pull requests. It must run
+      # after `Build` — the demo resolves `dist/`, not `src/`, and npm links
+      # the `inbox-worker` bin only if `dist/cli.js` exists at install time.
+      #
+      # The cost is one more `npm ci` (~40 packages, its own copy of workerd).
+      # Paid because a demo that silently stops working is worse than no demo:
+      # it is instructions we ship and nobody runs.
+      - name: The demo still builds and migrates
+        if: ${{ !cancelled() }}
+        working-directory: demo
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run typecheck
+          npm run db:migrate:local
+          npx wrangler deploy --dry-run
+
       # Installing from git is a different path from installing a tarball, and
       # it broke while the tarball check stayed green. npm runs `prepare` on a
       # git dependency and ships whatever that leaves behind — so a `prepare`
@@ -115,6 +140,10 @@ jobs:
       # Build step above had already left `dist/` lying around.
       #
       # Until there is a release, git is how anything actually consumes this.
+      #
+      # Last in the job, deliberately: it deletes `dist/` and lets `prepare`
+      # rebuild it, so anything above that needs `dist/` — the CLI smoke test,
+      # the tarball install, the demo — must already have run.
       #
       # Deleting `dist/` first is the whole point: it forces `prepare` to be
       # the thing that recreates it. Cloning `git+file://` from the CI checkout
