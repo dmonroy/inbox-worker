@@ -394,6 +394,92 @@ describe('what the caps discarded', () => {
       { cap: 'attachments', limit: 1, found: 2, dropped: 1 },
     ])
   })
+
+  test('never lets the row claim a message arrived with no attachments', async () => {
+    // `has_attachments` describes what *arrived*, not what survived the caps.
+    //
+    // Reachable on the defaults, not just on a lowered cap: `attachmentBytes`
+    // is 20 MB and the platform accepts 25 MB inbound, and `byBytes` stops at
+    // the first attachment that does not fit rather than skipping it — so one
+    // 21 MB attachment leaves `kept: []`. Bound from the capped message, the
+    // row then states the message had none, and every `WHERE has_attachments`
+    // query skips it silently. The overflow in `meta` says otherwise, so the
+    // row also contradicts itself.
+    //
+    // The lowered cap here reproduces the same `kept: []` in a few hundred
+    // bytes. Asserted together with zero `attachments` rows, because the pair
+    // is the point: "carried attachments, holds none of them extracted" has to
+    // be a state the row can express.
+    await conversation('v-sales', 'sales')
+    const parsed = await parse(INLINE_AND_ATTACHMENT, 'sales@example.org')
+    const { message, overflows } = applyCaps(parsed, {
+      ...DEFAULT_CAPS,
+      attachmentBytes: 1,
+    })
+    expect(message.attachments).toEqual([])
+
+    await storeInbound(
+      { db: db(), bucket: bucket() },
+      { message, inboxKey: 'sales', conversationId: 'v-sales', overflows },
+    )
+
+    expect(await count('attachments')).toBe(0)
+    expect(
+      (await contentRow()).has_attachments,
+      'has_attachments says the message carried none, but the byte cap dropped one it did carry',
+    ).toBe(1)
+  })
+
+  test('says the same when the count cap, not the byte cap, emptied the list', async () => {
+    // The two caps are separate `Overflow.cap` values and only one of them can
+    // be checked by accident. `applyCaps` takes its caps as an argument, so a
+    // deployment that wants raw-only archival can set `attachments: 0` — and
+    // that must not turn into the row asserting nothing was attached either.
+    //
+    // This fails if someone later decides only `attachmentBytes` can empty the
+    // list.
+    await conversation('v-sales', 'sales')
+    const parsed = await parse(INLINE_AND_ATTACHMENT, 'sales@example.org')
+    const { message, overflows } = applyCaps(parsed, {
+      ...DEFAULT_CAPS,
+      attachments: 0,
+    })
+    expect(overflows.map((o) => o.cap)).toEqual(['attachments'])
+
+    await storeInbound(
+      { db: db(), bucket: bucket() },
+      { message, inboxKey: 'sales', conversationId: 'v-sales', overflows },
+    )
+
+    expect(await count('attachments')).toBe(0)
+    expect(
+      (await contentRow()).has_attachments,
+      'has_attachments says the message carried none, but the count cap dropped the ones it did carry',
+    ).toBe(1)
+  })
+
+  test('leaves has_attachments false when nothing was attached at all', async () => {
+    // The other half. A flag that is true whenever an overflow list is
+    // non-empty would pass both tests above and be useless — a `participants`
+    // or `references` overflow says nothing about attachments.
+    await conversation('v-sales', 'sales')
+    const parsed = await parse(PLAIN_TEXT, 'sales@example.org')
+    const { message, overflows } = applyCaps(parsed, {
+      ...DEFAULT_CAPS,
+      participants: 0,
+    })
+    expect(overflows.map((o) => o.cap)).toEqual(['participants'])
+
+    await storeInbound(
+      { db: db(), bucket: bucket() },
+      { message, inboxKey: 'sales', conversationId: 'v-sales', overflows },
+    )
+
+    expect(
+      (await contentRow()).has_attachments,
+      'has_attachments claims an attachment that never existed — an unrelated overflow set it',
+    ).toBe(0)
+  })
 })
 
 describe('a key prefix', () => {

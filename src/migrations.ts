@@ -80,6 +80,13 @@ export const MIGRATIONS: Migration[] = [
          WHERE provider_key IS NOT NULL`,
 
       // CONTENT: the payload, stored once however many inboxes received it.
+      //
+      // `has_attachments` is about the message as it **arrived**, not about
+      // how many `attachments` rows hang off it — the caps can drop every one
+      // of them, and a flag bound to the survivors would state that a message
+      // carrying a 21 MB PDF carried nothing. See `hadAttachments` in
+      // `store.ts`. So `has_attachments = 1` with no `attachments` rows is a
+      // real state, and it is the query for "what did the caps truncate".
       `CREATE TABLE IF NOT EXISTS contents (
          id               TEXT PRIMARY KEY,
          channel          TEXT NOT NULL,
