@@ -1,0 +1,27 @@
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Cloudflare / wrangler
+# .wrangler/ holds local state, including the miniflare-backed D1 and R2
+# used by `wrangler dev` and vitest-pool-workers.
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# logs & noise
+*.log
+npm-debug.log*
+.DS_Store
+
+# editors
+.idea/
+.vscode/
+*.swp

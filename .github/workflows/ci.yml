@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run tells you nothing. Keep only the newest per ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only token: nothing here needs to write to the repo.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `ci` not `install` — installs exactly the lockfile, and fails if
+      # package.json and the lockfile have drifted apart.
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
