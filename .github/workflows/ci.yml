@@ -14,6 +14,20 @@ concurrency:
 permissions:
   contents: read
 
+# Two jobs, split by cost. `check` is everything that runs on the default pool
+# — lint, types, the unit suite, the build, the CLI smoke test — and is the
+# feedback you actually wait on. `integration` boots workerd through miniflare
+# and talks to real local D1 and R2; that is the slow half, and the fast half
+# should no longer be stuck behind it.
+#
+# They run in parallel with no `needs` between them, deliberately. Gating
+# integration on `check` would let a formatting nit hide a broken migration
+# until the next round trip — the same failure mode `!cancelled()` prevents
+# within a job, one level up.
+#
+# The price is a second checkout, setup-node and `npm ci`. That was not worth
+# paying when the whole suite was ~1s of work against ~20s of setup. It is now
+# that half of it needs a runtime started first.
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -29,14 +43,10 @@ jobs:
       # package.json and the lockfile have drifted apart.
       - run: npm ci
 
-      # Every check runs even when an earlier one fails, so one push reports
-      # every problem. Otherwise a formatting nit hides a broken test and you
-      # find out on the next round trip.
-      #
-      # Separate jobs would also give that, but each would repeat checkout,
-      # setup-node and `npm ci` — ~20s of setup against ~1s of actual work.
-      # Worth revisiting once the suite needs miniflare and gets slow enough
-      # that a fast lint job is genuinely useful feedback.
+      # From here every step runs even when an earlier one fails, so one push
+      # reports every problem. Otherwise a formatting nit hides a broken test
+      # and you find out on the next round trip. `npm ci` above is the
+      # exception: nothing downstream of it means anything if it failed.
 
       # The same check the pre-commit hook runs. The hook is bypassable, so
       # this is where formatting and lint are actually enforced.
@@ -47,9 +57,11 @@ jobs:
         if: ${{ !cancelled() }}
         run: npm run typecheck
 
-      - name: Test
+      # The `unit` vitest project only. The `platform` project is the
+      # `integration` job below — see `vitest.config.ts` for the split.
+      - name: Unit tests
         if: ${{ !cancelled() }}
-        run: npm test
+        run: npm run test:unit
 
       # Typecheck runs with bundler resolution and does not care about import
       # extensions; Node ESM does. The first build of the CLI emitted
@@ -72,3 +84,29 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           node ./dist/cli.js 2>&1 | grep -q '^Usage: inbox-worker migrate'
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The `platform` vitest project: inside workerd, against the local D1 and
+      # R2 that miniflare stands up from the bindings declared in
+      # `vitest.config.ts`. Nothing here reaches Cloudflare, so the job needs
+      # no account, no API token and no secrets — which is what keeps it safe
+      # to run on pull requests under the same read-only token as everything
+      # else.
+      #
+      # No `if: ${{ !cancelled() }}` — it is the only check in this job, so
+      # there is nothing after it to protect, and running it on top of a failed
+      # `npm ci` would just report the install failure a second time in a less
+      # obvious form.
+      - name: Integration tests
+        run: npm run test:integration

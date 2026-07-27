@@ -9,6 +9,8 @@
     "fix": "biome check --write",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:integration": "vitest run --project platform",
     "test:watch": "vitest",
     "build": "tsc -p tsconfig.build.json"
   },
