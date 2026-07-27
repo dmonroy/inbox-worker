@@ -215,6 +215,18 @@ function bytes(content: MimeAttachment['content']): Uint8Array {
 const MAX_FILENAME = 255
 
 /**
+ * U+2028/U+2029 (line/paragraph separator), U+061C, U+200E/U+200F (the marks),
+ * U+202A–U+202E (embeddings and overrides) and U+2066–U+2069 (isolates).
+ *
+ * Two problems in one class. The separators are line terminators to a JS regex
+ * but sit outside the C0 range, so a control-character strip misses them. The
+ * bidi codepoints have no width and reverse everything after them, which is
+ * the disguised-extension trick.
+ */
+const BIDI_AND_LINE_SEPARATORS =
+  /[\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g
+
+/**
  * Attachment names never reach a storage key — R2 keys are content hashes
  * (§4), which removes hostile filenames from the key space entirely. So this
  * protects whoever *serves* a download later and reaches for `filename` to
@@ -227,20 +239,50 @@ const MAX_FILENAME = 255
 function filename(value: string | null): string | undefined {
   if (value === null) return undefined
 
-  let name = value
-    // Basename. Covers `../../etc/passwd`, `/etc/shadow`, and Windows paths.
-    .replace(/^.*[/\\]/, '')
+  // **Strip first, take the basename second.** The opposite order was a real
+  // bug: the basename strip was `^.*[/\\]`, and a JS `.` never matches a line
+  // terminator, so `report.pdf<CRLF>/../../etc/passwd` failed to match the
+  // pattern *at all* and the whole path survived. The control-character pass
+  // then removed the CRLF, erasing the evidence. A step that its own input can
+  // silently disable has to run after that input is cleaned, never before.
+  const cleaned = value
     // A CR or LF here is a header-injection primitive downstream.
     // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
     .replace(/[\u0000-\u001f\u007f]/g, '')
-    .trim()
+    // Line terminators the C0 range misses (U+2028/U+2029), plus the bidi
+    // marks, embeddings, overrides and isolates. U+202E is the interesting
+    // one: `invoice<U+202E>gnp.exe` renders as `invoicexe.png`.
+    .replace(BIDI_AND_LINE_SEPARATORS, '')
+    // `"` and `;` end a `Content-Disposition` parameter, so
+    // `a"; filename="evil.exe` closes ours and opens one of the sender's
+    // choosing. Removed rather than escaped, because the doc comment above
+    // promises the result is safe to drop into that header — and escaping only
+    // holds if every future caller quotes it exactly the way we guessed.
+    .replace(/[";]/g, '')
+
+  // Basename. Covers `../../etc/passwd`, `/etc/shadow`, and Windows paths.
+  // A split rather than a replace: the reason this function was broken is that
+  // a regex looked obviously right and was not, and the last element of a
+  // split carries no such subtlety.
+  const segments = cleaned.split(/[/\\]/)
+  let name = (segments[segments.length - 1] ?? '').trim()
 
   // All-dots is not a name, it is a directory reference.
   if (name === '' || /^\.+$/.test(name)) return undefined
 
   // Truncation loses the extension, which is acceptable: `mimeType` is stored
   // beside it and is the authoritative type. A name this long is not real.
-  if (name.length > MAX_FILENAME) name = name.slice(0, MAX_FILENAME)
+  if (name.length > MAX_FILENAME) {
+    const cut = name.slice(0, MAX_FILENAME)
+    // `length` counts UTF-16 code units, so the cut can land between the two
+    // halves of a surrogate pair and store a lone surrogate — not valid UTF-8,
+    // and it survives into D1 and JSON to break something a long way from
+    // here. Shrink by one instead — the same rule `previewOf` in `store.ts`
+    // applies when it cuts `body_preview`.
+    const last = cut.charCodeAt(cut.length - 1)
+    const orphan = last >= 0xd800 && last <= 0xdbff
+    name = orphan ? cut.slice(0, -1) : cut
+  }
 
   return name
 }

@@ -92,9 +92,25 @@ export const INLINE_AND_ATTACHMENT = mail(
 )
 
 /**
- * Filenames built to escape the place they are written. In order: path
- * traversal, an absolute path, a Windows path, a CRLF header injection, a name
- * that is nothing but dots, and one far past any filesystem's length limit.
+ * A UTF-8 RFC 2047 base64 encoded-word. `btoa` alone only takes latin1, and
+ * several of the names below are deliberately non-latin1.
+ */
+function word(name: string): string {
+  let latin1 = ''
+  for (const byte of enc.encode(name)) latin1 += String.fromCharCode(byte)
+  return `=?utf-8?B?${btoa(latin1)}?=`
+}
+
+/**
+ * Filenames built to escape the place they are written. Positional — the tests
+ * destructure by index, so **append, never insert**.
+ *
+ * In order: path traversal, an absolute path, a Windows path, a CRLF header
+ * injection, a name that is nothing but dots, one far past any filesystem's
+ * length limit, then three that hide a path separator behind a character a
+ * JS `.` does not match, one that closes a `Content-Disposition` parameter,
+ * one that disguises its extension with a bidi override, and one whose
+ * truncation point lands inside a surrogate pair.
  *
  * They are RFC 2047 encoded-words rather than quoted strings, because a
  * quoted string cannot carry a raw CRLF and treats backslash as an escape.
@@ -108,6 +124,17 @@ const hostile = [
   '=?utf-8?B?cmVwb3J0LnBkZg0KWC1JbmplY3RlZDogeWVz?=',
   '=?utf-8?B?Li4=?=',
   `=?utf-8?B?${btoa(`${'a'.repeat(400)}.pdf`)}?=`,
+  word('report.pdf\r\n/../../etc/passwd'),
+  word('x\n/etc/shadow'),
+  // U+2028 is a line terminator to a JS regex but not a C0 control, so it is
+  // invisible to both the basename strip and the control-character pass.
+  word('x\u2028/../../etc/passwd'),
+  word('a"; filename="evil.exe'),
+  // U+202E right-to-left override: renders as `invoicexe.png`.
+  word('invoice\u202egnp.exe'),
+  // 254 ASCII then astral characters, so a 255-code-unit cut lands between the
+  // surrogates of the first emoji.
+  word(`${'a'.repeat(254)}${'\u{1f600}'.repeat(3)}`),
 ]
 
 export const HOSTILE_FILENAMES = mail(

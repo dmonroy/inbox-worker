@@ -259,9 +259,10 @@ describe('attachment keys', () => {
   })
 
   test('survive names built to escape the place they are written', async () => {
-    // Six names decoded from RFC 2047: traversal, absolute path, Windows path,
-    // CRLF injection, all-dots, and one 400 characters long. None of them can
-    // reach the key, so none of them can reach a bucket path.
+    // Names decoded from RFC 2047: traversal, absolute path, Windows path,
+    // CRLF injection, all-dots, overlong, and the line-terminator variants
+    // that once defeated the basename strip entirely. None of them can reach
+    // the key, so none of them can reach a bucket path.
     await conversation('v-sales', 'sales')
     const message = await parse(HOSTILE_FILENAMES, 'sales@example.org')
 
@@ -270,7 +271,11 @@ describe('attachment keys', () => {
       request(message, 'sales', 'v-sales'),
     )
 
-    expect(result.attachmentKeys).toHaveLength(6)
+    // Derived, not a literal. This asserted `6` and broke the moment the
+    // fixture grew — a count is not what this test protects, and hard-coding
+    // it turns every new hostile name into a false failure here.
+    expect(result.attachmentKeys).toHaveLength(message.attachments.length)
+    expect(result.attachmentKeys.length).toBeGreaterThan(0)
     for (const key of result.attachmentKeys) {
       expect(key).toMatch(
         new RegExp(`^att/${result.contentId}/[0-9a-f]{64}$`, 'u'),
