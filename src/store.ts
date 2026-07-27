@@ -445,9 +445,47 @@ function insertContent(
       request.verified === true ? 1 : 0,
       message.sentAt?.getTime() ?? null,
       message.raw.bytes.length,
-      message.attachments.length > 0 ? 1 : 0,
+      hadAttachments(request) ? 1 : 0,
       metaJson(request),
     )
+}
+
+/**
+ * Did the message **arrive** carrying an attachment — not, did one survive.
+ *
+ * `applyCaps` runs before this, so `message.attachments` is the kept prefix.
+ * Binding the flag from it made the column state something false: `byBytes`
+ * stops at the first attachment that does not fit rather than skipping it, so
+ * a single attachment over `attachmentBytes` leaves `kept: []` — reachable on
+ * the defaults, where the cap is 20 MB and the platform accepts 25 MB inbound.
+ * The row then said the message had no attachments while `meta.overflows`, on
+ * the same row, said one was dropped.
+ *
+ * Of the two readings, "what arrived" is the one that cannot mislead:
+ *
+ * - Every other fact on this row describes the message as received.
+ *   `size_bytes` is the whole raw object, dropped attachment included; the
+ *   bytes themselves are still in `raw_r2_key`. A flag scoped to the surviving
+ *   subset would be the only column on `contents` that is not about the
+ *   message.
+ * - The failures are not symmetric. `1` with no `attachments` rows sends a
+ *   reader looking and they find the overflow record. `0` makes every
+ *   `WHERE has_attachments` query skip the message with nothing to notice.
+ * - It costs no discoverability. `count(*)` over `attachments` already answers
+ *   "what did we extract", so truncation is
+ *   `has_attachments = 1 AND NOT EXISTS (SELECT 1 FROM attachments …)` — plain
+ *   SQL, no JSON blob to parse. Under the other reading the two facts collapse
+ *   into one bit and that query stops existing.
+ *
+ * Both attachment caps count, and only one of them is easy to remember: the
+ * count cap empties the list too when it is configured at 0.
+ */
+function hadAttachments(request: StoreRequest): boolean {
+  if (request.message.attachments.length > 0) return true
+
+  return (request.overflows ?? []).some(
+    (o) => o.cap === 'attachments' || o.cap === 'attachmentBytes',
+  )
 }
 
 /**
