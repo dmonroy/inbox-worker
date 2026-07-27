@@ -1,0 +1,430 @@
+# Security
+
+> **Early development.** No releases, no versions, and no supported
+> deployments. Nothing here is a commitment; it is a description of what the
+> code does today and what it is trying to do.
+
+This project stores a company's entire inbound mail archive. If you are
+evaluating it for a deployment, the second half of this file — the threat
+model — is the part worth your time.
+
+## Reporting a vulnerability
+
+Report privately. Do not open a public issue for anything that could be used
+against a running deployment.
+
+Use GitHub's private security advisories:
+
+**https://github.com/dmonroy/inbox-worker/security/advisories/new**
+
+There is no security contact address in this repository, and this file does not
+invent one. If the advisory form is unavailable — private vulnerability
+reporting has to be enabled per repository, and it may not be yet — open a
+public issue that says only that you have a security report and asks for a
+private channel. Leave the details out of it.
+
+Useful to include: the affected version or commit, what an attacker can do,
+and a message or input that reproduces it. Synthesised, please — see
+*Fixtures*, below.
+
+### What to expect
+
+Honestly: not much, yet.
+
+- One maintainer, working on this intermittently.
+- No release, no versioning, and therefore no security releases and no
+  backports. The fix will be a commit on `main`.
+- **No response-time commitment.** Nobody has agreed to an SLA, so this file
+  does not state one.
+- No bounty.
+
+If a report is valid, the fix gets a failing test before the fix, like every
+other bug in this repo.
+
+### Fixtures are synthesised, never real mail
+
+Test fixtures are committed to a public repository. Do not send a real
+message — it carries real addresses, subjects, and attachments. Construct a
+minimal synthetic reproducer.
+
+---
+
+## Threat model
+
+### The premise
+
+**Every inbound message is attacker-controlled input from an unauthenticated
+stranger.** That is the normal case for email, not the exceptional one. Anyone
+who can find an address can reach the ingest path, choose every header and
+every byte of the body, and repeat as often as they like.
+
+So the interesting question is never "is this input trusted" — it is not — but
+"what can it reach". Three answers this design keeps coming back to:
+
+1. **Identity must not be derived from anything the sender writes.** Otherwise
+   a stranger picks the storage key.
+2. **A crash is data loss, not an error.** Email has no retry, so a message
+   that crashes the handler is gone.
+3. **Grouping is a disclosure boundary.** Anything that decides two messages
+   belong together decides who sees whose mail.
+
+### What is actually implemented
+
+Several properties below are designed and reasoned about but **not yet built**.
+A security document that overstates coverage is worse than none, so:
+
+| Property | Where | Status |
+|---|---|---|
+| Envelope-only routing, address normalisation | `src/address.ts`, `src/resolve.ts` | implemented |
+| Quarantine fallback; system inboxes unaddressable | `src/resolve.ts` | implemented |
+| Config validation fails loudly at startup | `src/config.ts`, `src/validate.ts` | implemented |
+| Content-derived identity; trace-header stripping | `src/identity.ts`, `src/trace.ts` | implemented, and used by the storage path |
+| Content-addressed R2 keys; D1 writes | `src/store.ts` | implemented |
+| Child-row dedup keys (fan-out and retry safe) | `src/migrations.ts`, `src/store.ts` | implemented |
+| Parser caps (nesting depth, header bytes) | `src/mime.ts` | implemented |
+| Post-parse caps (attachments, bytes, participants, references) | `src/caps.ts` | implemented, **nothing calls it yet** — `storeInbound` takes the result as an input |
+| Attachment filename sanitisation | `src/mime.ts` | implemented |
+| Schema and migration runner; `migrate` command | `src/migrations.ts`, `src/cli.ts` | implemented |
+| **The email handler itself** | — | **not implemented** |
+| **Never-throw ingest and `failed_ingest`** | — | **not implemented** |
+| **Conversations, no-merge, DMARC-gated index writes** | — | **not implemented** (in review) |
+| **`replay` command** | — | **not implemented** |
+
+**There is no worker entry point in `src/` today** — no `email()` handler, no
+`fetch()`, nothing Cloudflare can invoke. Storage and identity are implemented
+and tested, but nothing calls them from a request, and the ingest caps are not
+wired in at all. **Do not deploy this.**
+
+That last row matters more than it looks: `storeInbound` accepts the cap
+overflow list as an *input* rather than enforcing caps itself, so whatever
+becomes the handler has to call `applyCaps` or the caps do not exist.
+
+The rest of this section describes each decision and marks the ones that are
+still design only.
+
+---
+
+### Identity never derives from unauthenticated input
+
+*Implemented as pure functions (`src/identity.ts`, `src/trace.ts`); not yet
+used by a storage path.*
+
+An earlier design used `sha256(channel + ':' + Message-ID)` as the content id
+and as the R2 object key. `Message-ID` is written by the sender. It is also
+world-visible: it appears in every quoted reply, every list archive, and every
+bounce. Keying storage on it gave two silent failures.
+
+- **Silent loss.** An appliance that emits a constant
+  `Message-ID: <alert@nagios>` stores alert #1. Alerts #2 through #500 collide
+  on `INSERT OR IGNORE` and the inbox shows rows pointing at the wrong body.
+  No error anywhere.
+- **Third-party overwrite.** Anyone who knew a `Message-ID` could mail the
+  system with that id and, under idempotent-overwrite semantics, replace that
+  message's stored `.eml`, body, and attachments while D1 still described the
+  original. That is an unauthenticated write into someone else's archive.
+
+Identity is now derived from the bytes:
+
+```
+rawHash   = sha256(raw bytes)                      exactly what arrived
+contentId = sha256(channel + ':' + normalizedHash) dedup key
+messageId = sha256(contentId + ':' + inboxKey)     one arrival
+```
+
+`normalizedHash` is the raw bytes with per-delivery trace headers removed —
+`Received`, `Received-SPF`, `X-Received`, `Delivered-To`, `Return-Path`,
+`Authentication-Results`, `ARC-Seal`, `ARC-Message-Signature`,
+`ARC-Authentication-Results`, `X-Forwarded-For`, `X-Forwarded-To`. Those are
+the headers an edge stamps differently per envelope recipient, so stripping
+them lets one message delivered to two inboxes agree on one id, while two
+genuinely different messages that happen to share a `Message-ID` stay apart.
+The list is provisional until a real fan-out is measured; erring wide is the
+safe direction, since stripping a header that was identical anyway costs
+nothing.
+
+**R2 will be content-addressed**, and that is the point: different bytes cannot
+produce the same key, so the overwrite attack stops existing rather than being
+forbidden. There is no `onlyIf` guard to get wrong, no policy to enforce, and
+no code path where the check could be skipped. Structural, not procedural.
+
+`Message-ID` survives as the threading key, where being sender-supplied is
+inherent to the job and the blast radius is bounded — see *Conversations*.
+
+**Residual risk.** Content addressing means byte-identical messages deduplicate,
+which is correct but has a corner: a sender who already holds an exact copy of
+a message can submit it first, and the later genuine arrival deduplicates
+against theirs. The stored payload is the same bytes either way; what differs
+is which raw object the row points at. Requires byte-exact prior knowledge, so
+it is narrow, but it is the honest cost of dedup-by-content.
+
+### The target comes from the envelope, never from a header
+
+*Implemented (`src/mime.ts`, `src/resolve.ts`).*
+
+Which inbox a message lands in is decided by the SMTP envelope recipient, which
+is passed into the parser rather than read out of the message. `To` is
+sender-supplied text that disagrees with the envelope on every bcc, forward,
+and mailing-list delivery. Routing on it would let a sender name the inbox
+their message arrives in.
+
+Related, and enforced in `src/resolve.ts`:
+
+- An address that will not parse, or a local part matching no inbox, falls back
+  to a built-in `quarantine` inbox. It is never rejected — see the next
+  section.
+- The `quarantine` inbox is marked `system` and is **not addressable**.
+  Mail to `quarantine@` falls back into it, but cannot match it directly, so
+  nobody can post into the review queue on purpose.
+- The one thing refused before storage is mail for a domain that was never
+  declared. That means the zone is pointed here by mistake, and quarantining it
+  silently would make a misconfiguration look like ordinary unknown-address
+  traffic.
+
+Addresses are normalised once, in one place: lowercase local part and domain,
+plus-tag stripped, tag case preserved. Two normalisation rules would mean
+`Darwin@Example.com` and `darwin@example.com` becoming two contacts, and every
+join against them missing one.
+
+### The ingest path never throws
+
+*Design decided; the handler that must obey it is **not yet written**.*
+
+An Email Worker has no transient-failure path. An unhandled exception makes
+Cloudflare return **521 after DATA — a permanent 5xx**. The sending server
+bounces the message to its author and **never retries**. `setReject()` is
+likewise a permanent SMTP error.
+
+So in this system a crash is not an error. It is mail loss.
+
+That makes any reachable parser crash a **censorship primitive**: craft a
+message that reliably breaks the parser and you can drop a thread, or keep
+`support@` bouncing indefinitely, from any address, at no cost. The failure is
+deterministic, so it recurs on every retry and the message can never be
+delivered at all.
+
+The rule: **once the raw bytes are in R2, the handler always returns success.**
+Everything after that write is wrapped; a failure records a `failed_ingest` row
+naming the R2 key, the channel, the envelope target, the stage, and the error,
+and then returns normally. A `replay` command drains the backlog after the bug
+is fixed.
+
+Two consequences worth stating:
+
+- **Orphaned R2 objects are not garbage.** An object in `raw/` with no D1 row
+  is either a message awaiting replay or the only surviving copy of one that
+  failed. Do not write a sweeper that deletes them.
+- **Migrations never run from the worker.** DDL on the never-throw path, driven
+  by an unauthenticated stranger, racing every isolate that started at the same
+  time, needing permanent runtime DDL rights — every part of that is wrong.
+  Migrations are a local command, run before deploy. The worker only reads the
+  schema version, and a version mismatch degrades to raw-in-R2 plus a loud log,
+  because refusing the message would destroy it.
+
+### Conversations are never merged
+
+*Design decided; **not yet implemented**.*
+
+Email threading is inferred from `In-Reply-To` and `References`. Both are
+unauthenticated, sender-written headers.
+
+An earlier design merged two conversations when a message referenced both,
+repointing the losers' rows. That is an **attacker-writable merge**: one email
+listing message ids harvested from two different customers' threads — ids that
+are visible in any quoted reply — merges those threads, and each customer's
+messages appear in the other's conversation view. There is no undo and no
+record of the pre-merge state. It was also unbounded (a message referencing ids
+across four hundred conversations rewrites every row in all of them, inside one
+batch, past D1's limits, failing identically on every retry) and
+non-convergent under concurrency.
+
+So: a message **joins** the conversation with the lexicographically smallest
+matching id, and conversations are **never merged**. Deterministic,
+commutative, constant work, safe under any interleaving.
+
+The cost is honest: a thread that should have been one conversation can stay
+split in two. In a shared inbox an occasional split is an annoyance; a wrong
+merge leaks one customer's mail into another's thread. Not a close call.
+
+**Index writes for not-yet-seen ids are gated on DMARC.** The conversation
+index maps every message id seen — including ids only *referenced*, never
+received — to a conversation, so that a late-arriving parent joins its thread
+instead of forking. Ungated, that is a **thread-hijacking primitive**: mail
+`support@` with `References: <id-you-expect-them-to-see>`, and the real message
+later joins *your* conversation.
+
+Any message may join through an index row that already exists. Only a
+DMARC-passing message may create a row for an id that has not been received.
+This is the one place authentication is enforced rather than merely recorded.
+
+Whoever implements that gate should note that `Authentication-Results` is a
+header a *sender* can also write. A message may arrive carrying a forged
+`Authentication-Results: … dmarc=pass` beneath the one the receiving edge
+prepended, and a naive read of the joined header value would find it. The gate
+has to read the edge's own result specifically, not any occurrence of the
+string.
+
+Subject-based fallback threading is **off**, for the same reason merging is:
+silently grouping strangers' mail is worse than occasionally splitting a
+thread.
+
+### Ingest caps, and what they actually bound
+
+*Implemented as a pure pass (`src/caps.ts`) plus two parser options
+(`src/mime.ts`); not yet called from an ingest path.*
+
+| Cap | Default | Enforced | Behaviour |
+|---|---|---|---|
+| MIME nesting depth | 20 | parser, pre-decode | throws |
+| header block bytes | 256 KiB | parser, pre-decode | throws |
+| attachments per message | 50 | post-parse | truncates |
+| total decoded attachment bytes | 20 MB | post-parse | truncates |
+| participants per message | 200 | post-parse | truncates |
+| `References` entries carried | 20 (the **last** 20) | post-parse | truncates |
+
+**Be precise about what these protect.** Only `depth` and `headerBytes` run
+before decoding, because they are parser options. `postal-mime` decodes every
+part before it returns, so **the attachment caps do not bound the parser's own
+allocation.** What bounds that is the platform's ~25 MB inbound limit together
+with the two parser caps, against a hard 128 MB isolate limit — and the
+realistic peak on a 25 MB message is 60–90 MB, because the raw buffer, the
+decoded parts, and the per-attachment copies are all resident at once.
+
+What the post-parse caps bound is everything *downstream*: R2 puts, D1 rows,
+and the extra copy each one makes. That is the failure that actually bites. Ten
+thousand tiny MIME parts is ten thousand R2 puts and ten thousand D1 rows in
+one invocation, past both the subrequest limit and the
+1,000-queries-per-invocation limit — so the message fails, and because it fails
+identically every time, it can never be delivered.
+
+The two kinds behave oppositely on purpose. Parser caps **throw**, because a
+message too deep to parse has no truncated form worth keeping; the handler will
+dead-letter it with the raw bytes intact. Post-parse caps **truncate and
+record** an overflow note, because refusing a message we can mostly read would
+lose it permanently.
+
+`References` keeps the **last** n, not the first — it runs oldest to newest, so
+the tail is the near ancestry a reply actually threads against.
+
+### Attachment filenames are hostile by default
+
+*Sanitisation implemented (`src/mime.ts`); storage keys not yet implemented.*
+
+An attachment filename is a string a stranger chose. It arrives RFC 2047
+encoded, so the hostile version only exists *after* the parser decodes it.
+
+The structural half of the answer: **storage keys are content hashes and never
+contain a filename.**
+
+```
+att/{contentId}/{sha256(attachment bytes)}
+```
+
+Names live in D1 as display data. Hostile filenames are removed from the key
+space entirely rather than being escaped out of it.
+
+`src/mime.ts` additionally sanitises the stored name. It strips C0 controls and
+DEL, then line separators and bidi marks, then `"` and `;`, and only then takes
+the basename — in that order, and the order is the point. It previously ran the
+basename strip *first*, using a regex that a line terminator anywhere earlier
+in the name caused to not match at all, so `report.pdf<CRLF>/../../etc/passwd`
+was stored with its path intact. A step that its own input can silently disable
+has to run after that input is cleaned.
+
+**Sanitisation is still not sufficient, and a consumer must not rely on it.**
+Known to survive, because each needs the consumer to transform the name before
+it becomes dangerous, and defending means guessing which transform:
+
+- `report.pdf:evil.exe` — a Windows drive or alternate-data-stream separator.
+- `%2e%2e%2fetc%2fpasswd` — anything that URL-decodes gets the traversal back.
+- U+2044 and fullwidth solidus — become `/` under NFKC normalisation.
+- Zero-width characters inside an otherwise all-dots name.
+- `CON`, `NUL`, `PRN` — Windows reserved device names.
+
+**The sanitiser cannot be finished, only improved.** The correct long-term
+answer is to stop sanitising and escape at use: store the decoded name verbatim
+and have each consumer encode for its own sink. That needs a consumer to exist
+first.
+
+**Anything that serves a download must do its own work.** Treat
+`attachments.filename` as untrusted text:
+
+- Never use it as a filesystem path or an object key. Use the content hash.
+- Percent-encode it into `Content-Disposition: attachment; filename*=UTF-8''…`
+  rather than interpolating it into a quoted parameter.
+- Serve attachments with `Content-Type` from `attachments.mime_type`, not from
+  the extension, plus `X-Content-Type-Options: nosniff`, and from an origin
+  that is not your application's — an attacker-supplied `text/html` attachment
+  served same-origin is stored XSS against your inbox UI.
+- Treat `text_body` and `html_body` the same way. **The HTML body is
+  attacker-authored HTML.** Nothing in this project sanitises it; storing it
+  verbatim is deliberate, because sanitising on the way in destroys the
+  archive's fidelity. Sanitise on the way out, or render in a sandboxed frame.
+
+### What is not defended against
+
+Stated so it is not mistaken for an oversight:
+
+- **Spam, phishing, and malware.** Nothing is scored, filtered, or scanned.
+  Everything addressed to a declared domain is stored. Filtering belongs in
+  front of the worker.
+- **Message content authenticity.** SPF, DKIM, and DMARC results will be
+  recorded and, for conversation-index writes, enforced. Nothing else in the
+  system treats a DMARC pass as a reason to trust the content. It is not.
+- **Sender-claimed timestamps.** `Date` is unverified and can be anything.
+  `received_at` is the only trusted ordering field.
+- **Traffic analysis and volume.** There is no rate limiting. Anyone who knows
+  an address can fill your R2 bucket at your expense.
+- **Address enumeration through timing.** Unknown local parts are quarantined
+  rather than rejected, which deliberately does not reveal which addresses
+  exist — but no attempt is made to equalise timing.
+- **Multi-tenancy.** There is none. Separate companies get separate
+  deployments; there is no boundary inside one.
+- **The read side.** There is no API, no UI, and no authentication or
+  authorisation code in this repository, because there is nothing to
+  authenticate against yet. Whoever builds the reader owns that entirely.
+
+---
+
+## What the operator is responsible for
+
+This is **self-hosted**. It runs in your Cloudflare account, against your D1
+database and your R2 bucket. There is no service and no third party — which
+also means there is nobody else securing it.
+
+- **The D1 database is the archive index.** Read access to it is read access to
+  every subject line, every sender, and most message bodies. Scope the binding
+  to the worker that needs it.
+- **The R2 bucket holds the complete raw messages.** Every `.eml`, every
+  attachment, verbatim. It must not be public. Content-addressed keys are not
+  secret — they are derived from the bytes, and anyone holding a copy of a
+  message can compute its key.
+- **Cloudflare account access is the whole system.** Account or API-token
+  compromise is total compromise: the mail archive, the routing configuration,
+  and the worker code. Use scoped API tokens, and require MFA on the account.
+- **Migrations run with your `wrangler` credentials**, from a person's machine
+  or from CI, before deploy. That is deliberate — the worker never holds DDL
+  rights. Protect whatever holds those credentials accordingly. (The command
+  that does this is not in this commit; `migrate()` in `src/migrations.ts` is
+  a test-harness affordance and must never be called from a handler.)
+- **Configuration is code.** Inboxes and domains live in a TypeScript file, so
+  changing who receives mail is a deploy. Review it like code.
+- **A `Member` inbox's `owner` address should be external.** Configuration
+  validation warns when it is on a domain this worker receives, because a login
+  code mailed to an inbox you need the login code to read is a lockout.
+
+### Retention is your problem, and it is an open question
+
+**Raw messages are retained indefinitely.** Every message that arrives is
+written to R2 in full and stays there. There is no expiry, no lifecycle rule,
+and no deletion path — not for a message, not for a contact, not for a sender
+who asks to be forgotten. Whether raw mail is kept forever is explicitly open
+in the design document and has not been decided.
+
+If you are subject to a retention limit or a data-subject deletion obligation,
+this project does not help you meet it today. You would need to implement both
+the R2 lifecycle policy and the D1 deletion yourself, and note that deleting a
+`contents` row without its R2 objects, or the reverse, leaves the archive
+inconsistent in a way nothing currently detects.
+
+The same applies to encryption at rest beyond what Cloudflare provides by
+default, to access logging, and to backups. None of them exist here.
