@@ -70,8 +70,9 @@ So the interesting question is never "is this input trusted" — it is not — b
 
 ### What is actually implemented
 
-Several properties below are designed and reasoned about but **not yet built**.
-A security document that overstates coverage is worse than none, so:
+Almost everything below is built; what varies is how far each part has been
+exercised. A security document that overstates coverage is worse than none, so
+the table says which is which:
 
 | Property | Where | Status |
 |---|---|---|
@@ -119,15 +120,16 @@ false. A security document that lags the code is worse than none — the reader
 cannot tell which rows to trust — so this table is updated with the code, not
 after it.
 
-The rest of this section describes each decision and marks the ones that are
-still design only.
+The rest of this section describes each decision, and each one opens by saying
+how far it has actually been exercised.
 
 ---
 
 ### Identity never derives from unauthenticated input
 
-*Implemented as pure functions (`src/identity.ts`, `src/trace.ts`); not yet
-used by a storage path.*
+*Implemented (`src/identity.ts`, `src/trace.ts`) and used by the storage path
+for every message (`src/store.ts`). **Verified in production**: an attachment
+pulled back out of R2 hashed to its own key, byte for byte.*
 
 An earlier design used `sha256(channel + ':' + Message-ID)` as the content id
 and as the R2 object key. `Message-ID` is written by the sender. It is also
@@ -154,15 +156,23 @@ messageId = sha256(contentId + ':' + inboxKey)     one arrival
 `normalizedHash` is the raw bytes with per-delivery trace headers removed —
 `Received`, `Received-SPF`, `X-Received`, `Delivered-To`, `Return-Path`,
 `Authentication-Results`, `ARC-Seal`, `ARC-Message-Signature`,
-`ARC-Authentication-Results`, `X-Forwarded-For`, `X-Forwarded-To`. Those are
-the headers an edge stamps differently per envelope recipient, so stripping
-them lets one message delivered to two inboxes agree on one id, while two
-genuinely different messages that happen to share a `Message-ID` stay apart.
-The list is provisional until a real fan-out is measured; erring wide is the
-safe direction, since stripping a header that was identical anyway costs
-nothing.
+`ARC-Authentication-Results`, `X-Forwarded-For`, `X-Forwarded-To`,
+`X-Forwarded-Encrypted`. Those are the headers an edge stamps differently per
+envelope recipient, so stripping them lets one message delivered to two inboxes
+agree on one id, while two genuinely different messages that happen to share a
+`Message-ID` stay apart.
 
-**R2 will be content-addressed**, and that is the point: different bytes cannot
+The list matches **exact names, never prefixes**, so a family has to be
+enumerated member by member — which is how `X-Forwarded-Encrypted` reached
+production unstripped and was found by diffing two real deliveries. It stays
+provisional, because the fan-out that has actually been observed is
+sender-side: Gmail split one compose into two SMTP transactions from two of its
+own servers before Cloudflare saw either. True envelope fan-out — one
+transaction, two `RCPT TO`, identical bytes — is the case this list exists for
+and it has never been measured. Erring wide is the safe direction, since
+stripping a header that was identical anyway costs nothing.
+
+**R2 is content-addressed**, and that is the point: different bytes cannot
 produce the same key, so the overwrite attack stops existing rather than being
 forbidden. There is no `onlyIf` guard to get wrong, no policy to enforce, and
 no code path where the check could be skipped. Structural, not procedural.
@@ -179,7 +189,9 @@ it is narrow, but it is the honest cost of dedup-by-content.
 
 ### The target comes from the envelope, never from a header
 
-*Implemented (`src/mime.ts`, `src/resolve.ts`).*
+*Implemented (`src/mime.ts`, `src/resolve.ts`), and **run against real mail**:
+routing by local part, the plus tag recorded rather than routed on, and
+quarantine fallback are all confirmed on a live zone.*
 
 Which inbox a message lands in is decided by the SMTP envelope recipient, which
 is passed into the parser rather than read out of the message. `To` is
@@ -279,7 +291,10 @@ Two consequences worth stating:
 
 ### Conversations are never merged
 
-*Design decided; **not yet implemented**.*
+*Implemented (`src/conversations.ts`), DMARC gate included (`src/dmarc.ts`).
+**Threading real replies** on a live zone — but only in order. A reply
+arriving before its parent, which the seeded index and the no-merge rule both
+exist for, has never happened outside a test.*
 
 Email threading is inferred from `In-Reply-To` and `References`. Both are
 unauthenticated, sender-written headers.
@@ -313,12 +328,18 @@ Any message may join through an index row that already exists. Only a
 DMARC-passing message may create a row for an id that has not been received.
 This is the one place authentication is enforced rather than merely recorded.
 
-Whoever implements that gate should note that `Authentication-Results` is a
-header a *sender* can also write. A message may arrive carrying a forged
-`Authentication-Results: … dmarc=pass` beneath the one the receiving edge
-prepended, and a naive read of the joined header value would find it. The gate
-has to read the edge's own result specifically, not any occurrence of the
-string.
+The gate is `src/dmarc.ts`, and the thing it has to get right is that
+`Authentication-Results` is a header a *sender* can also write. A message may
+arrive carrying a forged `Authentication-Results: … dmarc=pass` beneath the one
+the receiving edge prepended, and a naive read of the joined header value would
+find it. So it reads the first such header out of the raw bytes and believes it
+only when the `authserv-id` is the one this deployment expects — the edge's own
+result specifically, not any occurrence of the string.
+
+Real mail has exercised the accepting half: every Gmail delivery in the live
+run stored `verified = 1`. The refusing half — a forged header, a copied
+authserv-id, `dmarc=pass` appearing as a value rather than a method result — is
+covered by tests only, and no attacker has tried it here yet.
 
 Subject-based fallback threading is **off**, for the same reason merging is:
 silently grouping strangers' mail is worse than occasionally splitting a
@@ -327,7 +348,9 @@ thread.
 ### Ingest caps, and what they actually bound
 
 *Implemented as a pure pass (`src/caps.ts`) plus two parser options
-(`src/mime.ts`); not yet called from an ingest path.*
+(`src/mime.ts`), and applied to every message by the ingest pipeline
+(`src/ingest.ts`), live and replayed alike. **No cap has ever been hit in
+production** — nothing real has come close to any of the numbers below.*
 
 | Cap | Default | Enforced | Behaviour |
 |---|---|---|---|
@@ -364,7 +387,10 @@ the tail is the near ancestry a reply actually threads against.
 
 ### Attachment filenames are hostile by default
 
-*Sanitisation implemented (`src/mime.ts`); storage keys not yet implemented.*
+*Sanitisation implemented (`src/mime.ts`); content-addressed attachment keys
+implemented (`src/store.ts`) and **verified in production** — a real PDF pulled
+back out of R2 hashed to its own key. The sanitiser itself has only met
+ordinary filenames; nothing hostile has arrived.*
 
 An attachment filename is a string a stranger chose. It arrives RFC 2047
 encoded, so the hostile version only exists *after* the parser decodes it.
@@ -432,9 +458,11 @@ Stated so it is not mistaken for an oversight:
 - **Spam, phishing, and malware.** Nothing is scored, filtered, or scanned.
   Everything addressed to a declared domain is stored. Filtering belongs in
   front of the worker.
-- **Message content authenticity.** SPF, DKIM, and DMARC results will be
-  recorded and, for conversation-index writes, enforced. Nothing else in the
-  system treats a DMARC pass as a reason to trust the content. It is not.
+- **Message content authenticity.** The edge's DMARC verdict is recorded as
+  `contents.verified` and enforced for conversation-index writes. SPF and DKIM
+  results are not recorded at all — one boolean is read out of the header and
+  the rest is left in the raw bytes. Nothing else in the system treats a DMARC
+  pass as a reason to trust the content. It is not.
 - **Sender-claimed timestamps.** `Date` is unverified and can be anything.
   `received_at` is the only trusted ordering field.
 - **Traffic analysis and volume.** There is no rate limiting. Anyone who knows
@@ -468,9 +496,11 @@ also means there is nobody else securing it.
   and the worker code. Use scoped API tokens, and require MFA on the account.
 - **Migrations run with your `wrangler` credentials**, from a person's machine
   or from CI, before deploy. That is deliberate — the worker never holds DDL
-  rights. Protect whatever holds those credentials accordingly. (The command
-  that does this is not in this commit; `migrate()` in `src/migrations.ts` is
-  a test-harness affordance and must never be called from a handler.)
+  rights. Protect whatever holds those credentials accordingly. (The command is
+  `inbox-worker migrate --remote`, in `src/cli.ts`, and it shells out to
+  `wrangler` so there is no second credential to provision. `migrate()` in
+  `src/migrations.ts` is a test-harness affordance and must never be called
+  from a handler.)
 - **Configuration is code.** Inboxes and domains live in a TypeScript file, so
   changing who receives mail is a deploy. Review it like code.
 - **A `Member` inbox's `owner` address should be external.** Configuration
