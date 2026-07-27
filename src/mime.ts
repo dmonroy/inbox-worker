@@ -13,6 +13,7 @@
 import type { Address, Attachment as MimeAttachment } from 'postal-mime'
 import PostalMime from 'postal-mime'
 import { normalizeAddress } from './address'
+import { DEFAULT_CAPS, type IngestCaps } from './caps'
 import type {
   Attachment,
   ContactRef,
@@ -33,17 +34,31 @@ export interface ParseContext {
    */
   target: string
   receivedAt: Date
+  /**
+   * Only `depth` and `headerBytes` are read here — they have to be set before
+   * parsing to mean anything. The rest are applied by `applyCaps` afterwards,
+   * because postal-mime decodes every part before it returns.
+   */
+  caps?: IngestCaps
 }
 
 export async function parseEmail(
   raw: Uint8Array,
   ctx: ParseContext,
 ): Promise<Inbound> {
+  const caps = ctx.caps ?? DEFAULT_CAPS
+
   const email = await PostalMime.parse(raw, {
     // Decoded bytes, not a base64 string. Attachment R2 keys are a hash of the
     // content (§4), and hashing the encoded form would key the same file
     // differently depending on how the sender encoded it.
     attachmentEncoding: 'arraybuffer',
+    // These two throw rather than truncate, which is the only thing they can
+    // do: a message too deep or too header-heavy to parse has no truncated
+    // form to keep. The handler dead-letters it with the raw bytes intact.
+    // Left unset, postal-mime allows 256 levels and 2 MB of headers.
+    maxNestingDepth: caps.depth,
+    maxHeadersSize: caps.headerBytes,
   })
 
   const meta: EmailMeta = {
