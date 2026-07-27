@@ -85,6 +85,28 @@ jobs:
         run: |
           node ./dist/cli.js 2>&1 | grep -q '^Usage: inbox-worker migrate'
 
+      # The same class of gap as the one above, one level out. Tests import by
+      # relative path; consumers import by package name through the `exports`
+      # map. Nothing in the suite exercises that map, so a renamed dist file or
+      # a wrong entry point stays green here and breaks on first install.
+      #
+      # Packing and installing is the only check that resolves the way a
+      # consumer does, which is why this is worth the ~15s rather than
+      # asserting the files merely exist on disk.
+      - name: The package resolves as a dependency
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          npm pack --silent
+          mkdir -p /tmp/consumer
+          cd /tmp/consumer
+          npm init -y >/dev/null
+          npm install --no-save "$GITHUB_WORKSPACE"/inbox-worker-*.tgz
+          node --input-type=module -e "
+            await import('inbox-worker')
+            await import('inbox-worker/testing')
+          "
+
   integration:
     runs-on: ubuntu-latest
     steps:
