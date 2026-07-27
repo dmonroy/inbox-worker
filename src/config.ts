@@ -16,8 +16,8 @@ import {
   QUARANTINE,
   type ResolvedConfig,
   type TeamInbox,
-} from './types'
-import { validate } from './validate'
+} from './types.js'
+import { validate } from './validate.js'
 
 export {
   type Channel,
@@ -28,7 +28,7 @@ export {
   QUARANTINE,
   type ResolvedConfig,
   type TeamInbox,
-} from './types'
+} from './types.js'
 
 /** A shared inbox. Teams have no owner: a team is not a person. */
 export function Team(name: string): TeamInbox {

@@ -11,7 +11,7 @@
  * is stored with 50 and a note; refusing it would lose it permanently.
  */
 
-import type { Inbound } from './inbound'
+import type { Inbound } from './inbound.js'
 
 export interface IngestCaps {
   /** Attachments kept per message. */
