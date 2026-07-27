@@ -43,6 +43,15 @@ export interface EmailChannel {
   readonly domain: string
   /** Alias domains sharing one inbox space, lowercased. */
   readonly aliases: readonly string[]
+  /**
+   * The `authserv-id` of the edge whose `Authentication-Results` the DMARC
+   * gate believes, lowercased (§8).
+   *
+   * Required rather than optional, because absent would have to mean either
+   * "believe nobody" or "believe anybody" and neither is a sensible default
+   * for a value this load-bearing. `Email()` supplies Cloudflare's.
+   */
+  readonly authservId: string
 }
 
 export type Channel = EmailChannel

@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest'
-import { Email, inbox, Member, QUARANTINE, Team } from '../src/config'
+import {
+  CLOUDFLARE_AUTHSERV_ID,
+  Email,
+  Member,
+  QUARANTINE,
+  resolveConfig,
+  Team,
+} from '../src/config'
 
 const channels = [Email({ domain: 'mycompany.com' })]
 
@@ -39,17 +46,32 @@ describe('constructors', () => {
       id: 'email',
       domain: 'mycompany.com',
       aliases: ['mycompanyservice.com'],
+      authservId: CLOUDFLARE_AUTHSERV_ID,
     })
   })
 
   test('Email defaults to no aliases', () => {
     expect(Email({ domain: 'mycompany.com' }).aliases).toEqual([])
   })
+
+  test('Email carries an authserv-id, defaulted rather than optional', () => {
+    // The DMARC gate has to name whose `Authentication-Results` it believes
+    // (§8), and `undefined` would mean "believe anyone". A default that is
+    // wrong for a deployment fails *closed* — threads split — so a default is
+    // safe in a way that an absent value is not.
+    expect(Email({ domain: 'mycompany.com' }).authservId).toBe(
+      CLOUDFLARE_AUTHSERV_ID,
+    )
+    expect(
+      Email({ domain: 'mycompany.com', authservId: '  MX.Example.NET ' })
+        .authservId,
+    ).toBe('mx.example.net')
+  })
 })
 
-describe('inbox()', () => {
+describe('resolveConfig()', () => {
   test('resolves declared inboxes', () => {
-    const config = inbox({
+    const config = resolveConfig({
       inboxes: { sales: Team('Sales'), darwin: Member('Darwin') },
       channels,
     })
@@ -59,7 +81,10 @@ describe('inbox()', () => {
   })
 
   test('adds the built-in quarantine inbox', () => {
-    const config = inbox({ inboxes: { sales: Team('Sales') }, channels })
+    const config = resolveConfig({
+      inboxes: { sales: Team('Sales') },
+      channels,
+    })
 
     expect(config.inboxes.get(QUARANTINE)).toEqual({
       kind: 'team',
@@ -69,7 +94,10 @@ describe('inbox()', () => {
   })
 
   test('quarantine is marked system so it is unreachable by address', () => {
-    const config = inbox({ inboxes: { sales: Team('Sales') }, channels })
+    const config = resolveConfig({
+      inboxes: { sales: Team('Sales') },
+      channels,
+    })
     expect(config.inboxes.get(QUARANTINE)?.system).toBe(true)
     expect(config.inboxes.get('sales')?.system).toBeUndefined()
   })
@@ -79,7 +107,7 @@ describe('inbox()', () => {
     // is right — unlike a malformed message, which is a routing decision.
     // Reporting all of them beats fixing one typo per deploy.
     expect(() =>
-      inbox({
+      resolveConfig({
         inboxes: { Sales: Team('Sales'), 'bad key': Team('Bad') },
         channels,
       }),
@@ -87,7 +115,7 @@ describe('inbox()', () => {
   })
 
   test('returns warnings instead of logging them', () => {
-    const config = inbox({
+    const config = resolveConfig({
       inboxes: { darwin: Member('Darwin', { owner: 'darwin@mycompany.com' }) },
       channels,
     })
@@ -98,7 +126,7 @@ describe('inbox()', () => {
   })
 
   test('a clean config produces no warnings', () => {
-    const config = inbox({
+    const config = resolveConfig({
       inboxes: { darwin: Member('Darwin', { owner: 'darwin@gmail.com' }) },
       channels,
     })

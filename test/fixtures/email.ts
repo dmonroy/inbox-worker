@@ -206,3 +206,57 @@ export const NO_MESSAGE_ID = mail(
   ['From: ada@example.com', 'To: sales@example.org', 'Subject: Anonymous'],
   'No id here.\r\n',
 )
+
+/**
+ * Nested past the depth cap, so the parser **throws** (§5).
+ *
+ * Cheap to send and reliably fatal, which is what makes a reachable parser
+ * crash a censorship primitive rather than a bug: it costs an attacker one
+ * message to drop a thread, and it fails identically on every retry (§7.4).
+ * The handler has to survive this with the raw bytes kept.
+ */
+export const NESTED_BOMB = (() => {
+  let body = 'Content-Type: text/plain\r\n\r\ndeep\r\n'
+  for (let i = 30; i >= 1; i--) {
+    body =
+      `Content-Type: multipart/mixed; boundary="b${i}"\r\n\r\n` +
+      `--b${i}\r\n${body}--b${i}--\r\n`
+  }
+  return enc.encode(
+    [
+      'From: mallory@example.com',
+      'To: sales@example.org',
+      'Subject: Deep',
+      'Message-ID: <bomb-1@example.com>',
+      body,
+    ].join('\r\n'),
+  )
+})()
+
+/**
+ * `n` tiny attachments. The shape the post-parse caps exist for: ten thousand
+ * of these is ten thousand R2 puts and ten thousand D1 rows in one invocation,
+ * past both the subrequest and query limits (§5).
+ */
+export function manyAttachments(n: number): Uint8Array {
+  const parts = Array.from({ length: n }, (_, i) =>
+    [
+      '--b',
+      'Content-Type: text/plain',
+      `Content-Disposition: attachment; filename="part-${i}.txt"`,
+      '',
+      `part ${i}`,
+    ].join('\r\n'),
+  )
+
+  return mail(
+    [
+      'From: mallory@example.com',
+      'To: sales@example.org',
+      'Subject: Many parts',
+      'Message-ID: <many-1@example.com>',
+      'Content-Type: multipart/mixed; boundary="b"',
+    ],
+    `${parts.join('\r\n')}\r\n--b--\r\n`,
+  )
+}

@@ -22,6 +22,55 @@ database and object storage. There is no service and no third party.
 - A Workers **paid** plan — the free tier's CPU limit is too low to parse
   a large message
 
+## Usage
+
+`inbox()` returns a worker. Declare who receives and how things arrive, and
+export it:
+
+```ts
+import { Email, inbox, Member, Team } from 'inbox-worker'
+
+export default inbox({
+  inboxes: {
+    sales: Team('Sales'),
+    support: Team('Support'),
+    darwin: Member('Darwin Monroy', { owner: 'darwin@gmail.com' }),
+  },
+  channels: [Email({ domain: 'mycompany.com', aliases: ['mycompany.dev'] })],
+})
+```
+
+Bind an R2 bucket as `INBOX_BUCKET` and a D1 database as `INBOX_DB`, point an
+Email Routing catch-all rule at the worker, and mail to `sales@mycompany.com`
+lands in the `sales` inbox. Anything matching no inbox goes to a built-in
+`quarantine` inbox rather than bouncing — a permanent SMTP rejection would lose
+the message, and an unknown address is not a good enough reason for that. Mail
+for a domain no channel declares *is* refused, because that means a zone is
+pointed here by mistake.
+
+If you already export a worker of your own, `handlers(config)` gives you the
+same `email` handler to mount inside it. Set `INBOX_PREFIX` to scope R2 keys
+when two deployments share one bucket.
+
+### Threading and DMARC
+
+Conversations are inferred from `In-Reply-To` and `References`, which senders
+write and can therefore lie about. A message may always *join* a thread already
+known, but only a DMARC-passing message may claim an id nobody has received —
+otherwise `References: <id-I-expect-you-to-get>` is a way to capture someone
+else's future mail.
+
+That check reads the `Authentication-Results` header your receiving edge
+stamps, identified by its `authserv-id`, and defaults to Cloudflare Email
+Routing's. If mail reaches this worker through anything else, say so:
+
+```ts
+Email({ domain: 'mycompany.com', authservId: 'mx.example.net' })
+```
+
+Getting it wrong fails closed — nothing is trusted that should not be, and the
+symptom is a thread that occasionally splits in two.
+
 ## Migrations
 
 The package owns the schema; no SQL is copied into your repo. Applying it is a

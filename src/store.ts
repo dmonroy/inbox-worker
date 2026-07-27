@@ -12,9 +12,11 @@
  * rewrite writes the same bytes to the same key; the D1 ids are derived, so
  * every insert is `INSERT OR IGNORE` against one.
  *
- * Conversations are **not** written here. A conversation is resolved per
- * inbox by the step that owns threading (§8), and `conversationId` arrives
- * already decided.
+ * Conversations are **not** resolved here. A conversation is chosen per inbox
+ * by the step that owns threading (§8), and `conversationId` arrives already
+ * decided. The one conversation column this module does own is
+ * `message_count`, because it is the only place that knows whether a
+ * `messages` row was really inserted — see `countMessage`.
  */
 
 import type { Overflow } from './caps.js'
@@ -50,6 +52,62 @@ export interface StoreRequest {
   verified?: boolean
   /** From `applyCaps`. Kept in `contents.meta` so a truncated message says so. */
   overflows?: readonly Overflow[]
+  /**
+   * The already-stored raw object, when the caller wrote it earlier.
+   *
+   * The ingest handler has to: the never-throw rule only starts once the bytes
+   * are in R2, so the put happens *before* the parse that might crash (§7.4).
+   * Passing the result back avoids a second, identical put — the key is a
+   * content hash, so it would be a wasted subrequest rather than a conflict.
+   *
+   * Absent, this writes it itself, which is what the storage tests do.
+   */
+  raw?: StoredRaw
+}
+
+/** Where the raw bytes went, and what they hash to. */
+export interface StoredRaw {
+  key: string
+  sha256: string
+}
+
+/** Just enough of an `Inbound` to address the raw object — available pre-parse. */
+export interface RawObject {
+  bytes: Uint8Array
+  contentType: string
+  channel: string
+  receivedAt: Date
+}
+
+/**
+ * Put the raw bytes in R2 and say where they went.
+ *
+ * Split out of `storeInbound` because the ingest path cannot wait for it.
+ * Everything after this write is recoverable — the object is the message, and
+ * a `failed_ingest` row can always be added later — while a crash before it
+ * loses the mail outright. So it runs first, alone, and the rest of ingest
+ * runs inside a `try` (§4, §7.4).
+ *
+ * Idempotent: the key is the hash of the bytes, so a replay writes the same
+ * bytes to the same key.
+ */
+export async function putRaw(
+  env: StoreEnv,
+  raw: RawObject,
+): Promise<StoredRaw> {
+  const sha256 = await sha256Hex(raw.bytes)
+  const key = `${env.prefix ?? ''}${rawObjectKey(raw, sha256)}`
+
+  // The byte array is handed over as-is. A parser's `Uint8Array` is often a
+  // view onto a larger buffer, and R2 honours the view's bounds rather than
+  // storing the whole backing buffer — measured, because getting it wrong the
+  // other way means copying every attachment a second time on a 128 MB budget
+  // that §4.1 already puts at a 60–90 MB peak.
+  await env.bucket.put(key, raw.bytes, {
+    httpMetadata: { contentType: raw.contentType },
+  })
+
+  return { key, sha256 }
 }
 
 export interface StoreResult {
@@ -83,14 +141,21 @@ export async function storeInbound(
   const { message } = request
   const prefix = env.prefix ?? ''
 
-  const rawSha256 = await sha256Hex(message.raw.bytes)
+  const stored =
+    request.raw ??
+    (await putRaw(env, {
+      ...message.raw,
+      channel: message.channel,
+      receivedAt: message.receivedAt,
+    }))
+  const { key: rawKey, sha256: rawSha256 } = stored
+
   const contentId = await deriveContentId(
     message.channel,
     stripTraceHeaders(message.raw.bytes),
   )
   const arrivalId = await messageId(contentId, request.inboxKey)
 
-  const rawKey = `${prefix}${rawObjectKey(message, rawSha256)}`
   const body = splitBody(message)
   const bodyKey =
     body.spilled === undefined ? undefined : `${prefix}body/${contentId}.json`
@@ -103,16 +168,10 @@ export async function storeInbound(
 
   // R2 before D1, and everything in parallel: these are independent objects at
   // distinct content-addressed keys, so there is no ordering between them.
+  // The raw object is already up — `putRaw`, above or in the caller.
   //
-  // The byte arrays are handed over as-is. A parser's `Uint8Array` is often a
-  // view onto a larger buffer, and R2 honours the view's bounds rather than
-  // storing the whole backing buffer — measured, because getting it wrong the
-  // other way means copying every attachment a second time on a 128 MB budget
-  // that §4.1 already puts at a 60–90 MB peak.
+  // The byte arrays are handed over as-is, for the reason `putRaw` records.
   await Promise.all([
-    env.bucket.put(rawKey, message.raw.bytes, {
-      httpMetadata: { contentType: message.raw.contentType },
-    }),
     ...(bodyKey === undefined
       ? []
       : [
@@ -149,6 +208,8 @@ export async function storeInbound(
       bodyKey,
       body,
     }),
+    // Before the insert, and that is the whole trick — see `countMessage`.
+    countMessage(env.db, request, arrivalId),
     insertMessage(env.db, request, arrivalId, contentId),
   )
   for (const participant of message.participants) {
@@ -178,11 +239,11 @@ export async function storeInbound(
  * month will look in. No extension — `raw_content_type` in D1 says whether the
  * bytes are RFC822 or JSON, and a key that also claimed it could disagree.
  */
-function rawObjectKey(message: Inbound, sha256: string): string {
-  const at = message.receivedAt
+function rawObjectKey(raw: RawObject, sha256: string): string {
+  const at = raw.receivedAt
   const yyyy = at.getUTCFullYear()
   const mm = String(at.getUTCMonth() + 1).padStart(2, '0')
-  return `raw/${message.channel}/${yyyy}/${mm}/${sha256}`
+  return `raw/${raw.channel}/${yyyy}/${mm}/${sha256}`
 }
 
 interface DescribedAttachment {
@@ -417,6 +478,41 @@ function insertMessage(
       request.tag ?? null,
       request.message.receivedAt.getTime(),
     )
+}
+
+/**
+ * `conversations.message_count`, the one conversation column storage owns.
+ *
+ * Nothing else can own it correctly. `resolveConversation` runs first and
+ * cannot tell a new arrival from a redelivery it is about to ignore, so
+ * incrementing there over-counts every retry and every replay. The handler
+ * could ask afterwards whether the row was inserted, but only from outside the
+ * batch — leaving a window where the count and the rows disagree, and a second
+ * statement that can fail on its own after the message is already committed.
+ *
+ * Here it is exact by construction. `INSERT OR IGNORE INTO messages` is the
+ * next statement, so `NOT EXISTS` still sees the state *before* it: true only
+ * when the insert is really going to add a row. Both are in one batch and D1
+ * runs a batch as a transaction — measured — so there is no interleaving that
+ * can separate them. Ordering is load-bearing; swapping the two makes this a
+ * no-op that quietly leaves every count at zero.
+ *
+ * `messages.id` is the primary key, so the check is a point lookup: this does
+ * not scale with the size of the conversation, which is §8's standing promise.
+ */
+function countMessage(
+  db: D1Database,
+  request: StoreRequest,
+  arrivalId: string,
+): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE conversations
+          SET message_count = message_count + 1
+        WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM messages WHERE id = ?)`,
+    )
+    .bind(request.conversationId, arrivalId)
 }
 
 function insertParticipant(
