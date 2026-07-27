@@ -3,6 +3,25 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "prepare": "git config core.hooksPath .githooks || true",
     "check": "biome check",
@@ -18,13 +37,16 @@
     "@biomejs/biome": "^2.5.5",
     "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@cloudflare/workers-types": "^5.20260727.1",
-    "@types/node": "^26.1.1",
+    "@types/node": "^22",
     "typescript": "^5.7.3",
     "vitest": "^4.1.10",
     "wrangler": "^4.114.0"
   },
   "dependencies": {
     "postal-mime": "^2.7.5"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^5"
   },
   "bin": {
     "inbox-worker": "./dist/cli.js"
