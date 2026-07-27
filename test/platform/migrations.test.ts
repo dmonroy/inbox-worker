@@ -35,13 +35,40 @@ const tables = async (): Promise<string[]> => {
 }
 
 /**
+ * Children before parents, then whatever else is lying around — the noop and
+ * probe tables these tests invent have no references either way.
+ *
+ * D1 enforces foreign keys and ignores `PRAGMA foreign_keys = OFF` (§9.0), so
+ * dropping `contents` while a `messages` row still points at it fails outright.
+ * Alphabetical order — which is what `tables()` returns — happens to work only
+ * while every table is empty, and the failure would land in `beforeEach` and
+ * take down every test after it rather than the one that wrote the row.
+ */
+const CHILD_FIRST = [
+  'failed_ingest',
+  'conversation_index',
+  'attachments',
+  'participants',
+  'messages',
+  'contents',
+  'contacts',
+  'conversations',
+]
+
+/**
  * Explicit reset rather than relying on the pool to isolate storage per test.
  * These tests are entirely about what an empty database does versus a migrated
  * one, so "empty" has to be something this file guarantees rather than
  * inherits from a runner default that has already changed once.
  */
 beforeEach(async () => {
-  for (const name of await tables()) {
+  const present = await tables()
+  const ordered = [
+    ...CHILD_FIRST.filter((name) => present.includes(name)),
+    ...present.filter((name) => !CHILD_FIRST.includes(name)),
+  ]
+
+  for (const name of ordered) {
     await db().prepare(`DROP TABLE IF EXISTS "${name}"`).run()
   }
   expect(await tables()).toEqual([])
