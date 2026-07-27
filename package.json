@@ -23,7 +23,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "prepare": "git config core.hooksPath .githooks || true",
+    "hooks": "git config core.hooksPath .githooks || true",
+    "prepare": "npm run hooks && npm run build",
     "check": "biome check",
     "fix": "biome check --write",
     "typecheck": "tsc --noEmit",
