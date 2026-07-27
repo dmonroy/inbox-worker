@@ -50,3 +50,25 @@ jobs:
       - name: Test
         if: ${{ !cancelled() }}
         run: npm test
+
+      # Typecheck runs with bundler resolution and does not care about import
+      # extensions; Node ESM does. The first build of the CLI emitted
+      # extensionless imports and the binary would not start, with every test
+      # still green. Building is the only step that catches that.
+      - name: Build
+        if: ${{ !cancelled() }}
+        run: npm run build
+
+      # A build producing an unrunnable binary is not a build. Invoking it with
+      # no arguments exercises module resolution and the entrypoint guard while
+      # touching nothing external — no wrangler, no database.
+      #
+      # grep is the assertion, deliberately: if node dies on an unresolvable
+      # import, the output has no usage line and this fails.
+      #
+      # Block scalar because the grep pattern contains ": ", which a plain
+      # YAML scalar cannot.
+      - name: The CLI starts
+        if: ${{ !cancelled() }}
+        run: |
+          node ./dist/cli.js 2>&1 | grep -q '^Usage: inbox-worker migrate'

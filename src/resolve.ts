@@ -6,8 +6,8 @@
  * lands and changes nothing here.
  */
 
-import { parseAddress } from './address'
-import { QUARANTINE, type ResolvedConfig } from './types'
+import { parseAddress } from './address.js'
+import { QUARANTINE, type ResolvedConfig } from './types.js'
 
 export type Resolution =
   /** Addressed to a real inbox. */

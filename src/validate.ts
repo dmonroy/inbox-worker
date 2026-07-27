@@ -9,8 +9,8 @@
  * are legal but almost certainly a mistake.
  */
 
-import { parseAddress } from './address'
-import { type Channel, type InboxConfig, QUARANTINE } from './types'
+import { parseAddress } from './address.js'
+import { type Channel, type InboxConfig, QUARANTINE } from './types.js'
 
 export interface ValidationResult {
   errors: string[]

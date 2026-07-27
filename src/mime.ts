@@ -12,15 +12,15 @@
 
 import type { Address, Attachment as MimeAttachment } from 'postal-mime'
 import PostalMime from 'postal-mime'
-import { normalizeAddress } from './address'
-import { DEFAULT_CAPS, type IngestCaps } from './caps'
+import { normalizeAddress } from './address.js'
+import { DEFAULT_CAPS, type IngestCaps } from './caps.js'
 import type {
   Attachment,
   ContactRef,
   EmailMeta,
   Inbound,
   Participant,
-} from './inbound'
+} from './inbound.js'
 
 export interface ParseContext {
   /**
