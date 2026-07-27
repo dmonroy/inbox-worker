@@ -351,10 +351,18 @@ first.
 - Never use it as a filesystem path or an object key. Use the content hash.
 - Percent-encode it into `Content-Disposition: attachment; filename*=UTF-8''…`
   rather than interpolating it into a quoted parameter.
-- Serve attachments with `Content-Type` from `attachments.mime_type`, not from
-  the extension, plus `X-Content-Type-Options: nosniff`, and from an origin
-  that is not your application's — an attacker-supplied `text/html` attachment
-  served same-origin is stored XSS against your inbox UI.
+- **Do not serve attachments with `Content-Type` from `attachments.mime_type`.**
+  That column is the sender's `Content-Type` header — the same untrusted string
+  this list is about, and echoing it back is the stored-XSS path described
+  below rather than a defence against it. An earlier version of this file
+  recommended it, which was wrong.
+
+  Serve a type *you* chose: `application/octet-stream` for anything you are not
+  deliberately rendering, or a value derived from sniffing the bytes and
+  matched against an allowlist. Always with `X-Content-Type-Options: nosniff`,
+  and always from an origin that is not your application's — an
+  attacker-supplied `text/html` attachment served same-origin is stored XSS
+  against your inbox UI, whatever the header says.
 - Treat `text_body` and `html_body` the same way. **The HTML body is
   attacker-authored HTML.** Nothing in this project sanitises it; storing it
   verbatim is deliberate, because sanitising on the way in destroys the
