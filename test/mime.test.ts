@@ -339,6 +339,44 @@ describe('hostile filenames', () => {
     const [, , , , , long] = await filenames()
     expect(long?.length).toBe(255)
   })
+
+  test('a line terminator before a separator does not smuggle the path through', async () => {
+    // The basename strip used to be a `^.*[/\\]` replace. `.` never matches a
+    // line terminator and there is no `m` flag, so any of these names made the
+    // pattern fail to match at all — and the control-character pass then
+    // removed the evidence. This fails if someone reintroduces a `.`-based
+    // basename, or reorders so that stripping runs after the basename.
+    const [, , , , , , crlf, lf, lineSep] = await filenames()
+    expect(crlf).toBe('passwd')
+    expect(lf).toBe('shadow')
+    expect(lineSep).toBe('passwd')
+  })
+
+  test('a name cannot close a Content-Disposition parameter', async () => {
+    // The doc comment on `filename` promises it protects whoever builds that
+    // header. Leaving `"` and `;` in makes the promise false: this name ends
+    // the parameter and starts a new `filename=` of the sender's choosing.
+    const [, , , , , , , , , quoted] = await filenames()
+    expect(quoted).not.toMatch(/[";]/)
+    expect(quoted).toBe('a filename=evil.exe')
+  })
+
+  test('bidi controls are removed, so an extension cannot be disguised', async () => {
+    // `invoice<U+202E>gnp.exe` renders right-to-left from the override as
+    // `invoicexe.png`, so a reader clicks what looks like an image.
+    const [, , , , , , , , , , bidi] = await filenames()
+    expect(bidi).toBe('invoicegnp.exe')
+  })
+
+  test('truncation never splits a surrogate pair', async () => {
+    // A lone surrogate is not valid UTF-8. It reaches D1 and JSON and breaks
+    // whatever encodes it, far from here. Same rule `previewOf` applies to
+    // `body_preview`: shrink the cut by one rather than store half a pair.
+    const names = await filenames()
+    const astral = names[11]
+    expect(astral?.length).toBe(254)
+    expect(astral).not.toMatch(/[\ud800-\udfff]/)
+  })
 })
 
 describe('malformed input', () => {
