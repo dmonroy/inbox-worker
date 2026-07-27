@@ -23,7 +23,7 @@
  * bundler`, and would break any consumer on `node16`.
  */
 
-import { META_STATEMENT, MIGRATIONS, migrate } from './migrations.js'
+import { META_STATEMENT, MIGRATIONS, migrate, sqlOf } from './migrations.js'
 
 const encoder = new TextEncoder()
 
@@ -199,11 +199,15 @@ const META_TABLE = tableName(META_STATEMENT)
  *
  * Exported because a consumer pointing `INBOX_DB` at a database they already
  * use is entitled to know exactly which names this package claims.
+ *
+ * A statement that is not a `CREATE TABLE` contributes nothing, which is why
+ * an `ALTER TABLE … ADD COLUMN` adds no name: the table it alters was already
+ * claimed by the migration that created it.
  */
 export const INBOX_TABLES: readonly string[] = [
   ...new Set(
     [META_STATEMENT, ...MIGRATIONS.flatMap((m) => m.statements)]
-      .map(tableName)
+      .map((statement) => tableName(sqlOf(statement)))
       .filter((name) => name !== undefined),
   ),
 ]

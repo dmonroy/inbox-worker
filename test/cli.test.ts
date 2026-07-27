@@ -179,6 +179,19 @@ describe('planning what to run', () => {
     expect(plan(0, [m(3), m(1), m(2)]).map((p) => p.version)).toEqual([1, 2, 3])
   })
 
+  test('a tolerant statement stays tolerant in the plan', () => {
+    // The plan is what the CLI executes, so flattening statements to strings
+    // here would drop the marker and leave the production driver dying on the
+    // re-run that the binding driver survives.
+    const tolerant = {
+      sql: 'ALTER TABLE t1 ADD COLUMN c TEXT',
+      tolerate: 'duplicate-column' as const,
+    }
+    const [first] = plan(0, [{ ...m(1), statements: [tolerant] }])
+
+    expect(first?.statements[1]).toEqual(tolerant)
+  })
+
   test('every planned migration carries its own version write', () => {
     // Not one write at the end. A run that dies after migration 2 must leave
     // the version at 2, so the retry starts from 3 rather than redoing both.
@@ -271,5 +284,71 @@ describe('running the migration', () => {
     await runMigrate(opts, exec, (l) => lines.push(l))
 
     expect(lines.join('\n')).toMatch(/run it again/i)
+  })
+
+  describe('a tolerant statement on the wrangler driver', () => {
+    /**
+     * Verbatim from a spike against `wrangler d1 execute --local`: exit code
+     * 1, nothing useful on stdout, and SQLite's text on stderr behind an
+     * ANSI-coloured `✘ [ERROR]`. The colour codes are kept because they are
+     * what the matcher actually has to survive.
+     */
+    const wranglerStderr = (sqlite: string) =>
+      `[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1m${sqlite}[0m\n`
+
+    const migrations = (stderr: string) => {
+      const list: Migration[] = [
+        {
+          version: 1,
+          name: 'alter',
+          statements: [
+            {
+              sql: 'ALTER TABLE t ADD COLUMN c TEXT',
+              tolerate: 'duplicate-column',
+            },
+          ],
+        },
+      ]
+      const ran: string[] = []
+      const exec: Exec = async (args) => {
+        const sql = args[args.indexOf('--command') + 1] as string
+        if (sql.includes('SELECT value FROM _inbox_meta')) {
+          return {
+            code: 0,
+            stderr: '',
+            stdout: '[{"results":[],"success":true}]',
+          }
+        }
+        ran.push(sql)
+        return sql.startsWith('ALTER')
+          ? { code: 1, stdout: '', stderr }
+          : { code: 0, stdout: '[]', stderr: '' }
+      }
+      return { exec, ran, list }
+    }
+
+    test('a duplicate column does not stop the run', async () => {
+      // The CLI is the only production path (§2.8), so the re-run promise has
+      // to hold here and not merely in `migrate()`. Without this, an
+      // interrupted migration 2 fails on every retry and the version can never
+      // be recorded.
+      const { exec, ran, list } = migrations(
+        wranglerStderr('duplicate column name: c: SQLITE_ERROR'),
+      )
+      const code = await runMigrate(opts, exec, quiet, list)
+
+      expect(code).toBe(0)
+      expect(ran.at(-1)).toBe(versionStatement(1))
+    })
+
+    test('any other failure still stops the run', async () => {
+      const { exec, ran, list } = migrations(
+        wranglerStderr('no such table: t: SQLITE_ERROR'),
+      )
+      const code = await runMigrate(opts, exec, quiet, list)
+
+      expect(code).toBe(1)
+      expect(ran.some((s) => s.includes('INSERT INTO _inbox_meta'))).toBe(false)
+    })
   })
 })
