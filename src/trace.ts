@@ -12,10 +12,19 @@
  */
 
 /**
- * Provisional. The definitive list is whatever a real fan-out measurement
- * shows actually differing between two invocations — see spike A in PLAN.md.
+ * Exact names, never prefixes — see `isTrace`. That means a header family the
+ * design describes as `X-Forwarded-*` has to be enumerated member by member,
+ * and one that is not written down here survives. `X-Forwarded-Encrypted`
+ * reached production that way (DESIGN §4.2).
+ *
+ * The counterpart list is written out in DESIGN §4 so the two can be diffed.
+ * Keep them in the same order, and add to both.
+ *
  * Erring wide is safe: stripping a header that was in fact identical costs
- * nothing, while missing one splits an email into two stored copies.
+ * nothing, while missing one splits an email into two stored copies. Erring
+ * wide is not the same as guessing, though — every name here is stamped by
+ * something on the delivery path, so it can differ between two deliveries of
+ * one message. Headers the *sender* wrote are part of the message and stay.
  */
 const TRACE_HEADERS = new Set([
   'received',
@@ -29,6 +38,7 @@ const TRACE_HEADERS = new Set([
   'arc-authentication-results',
   'x-forwarded-for',
   'x-forwarded-to',
+  'x-forwarded-encrypted',
 ])
 
 const LF = 0x0a
