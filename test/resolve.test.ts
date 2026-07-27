@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'vitest'
-import { Email, inbox, Member, QUARANTINE, Team } from '../src/config'
+import { Email, Member, QUARANTINE, resolveConfig, Team } from '../src/config'
 import { resolveTarget } from '../src/resolve'
 
-const config = inbox({
+const config = resolveConfig({
   inboxes: {
     sales: Team('Sales'),
     support: Team('Support'),
@@ -130,7 +130,7 @@ describe('rejection', () => {
 })
 
 describe('multiple channels', () => {
-  const multi = inbox({
+  const multi = resolveConfig({
     inboxes: { sales: Team('Sales') },
     channels: [Email({ domain: 'a.com' }), Email({ domain: 'b.com' })],
   })

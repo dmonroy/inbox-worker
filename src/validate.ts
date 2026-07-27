@@ -100,6 +100,21 @@ export function validate(config: InboxConfig): ValidationResult {
     }
   }
 
+  // The `authserv-id` identifies the edge that stamps `Authentication-Results`
+  // in front of this worker, which is one edge however many domains it fronts.
+  // Two answers cannot both be right, and leaving it legal would mean the
+  // DMARC gate believes whichever channel the handler reads first — a security
+  // decision settled by array order (§8).
+  const ids = new Set(
+    config.channels.filter((c) => c.id === 'email').map((c) => c.authservId),
+  )
+  if (ids.size > 1) {
+    errors.push(
+      `Email channels disagree on authserv-id (${[...ids].map((id) => `"${id}"`).join(', ')}). ` +
+        `It names the receiving edge, so every email channel shares one.`,
+    )
+  }
+
   return { errors, warnings }
 }
 

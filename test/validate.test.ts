@@ -164,3 +164,30 @@ test('every problem is reported, not just the first', () => {
   })
   expect(errors).toHaveLength(3)
 })
+
+describe('the DMARC authserv-id', () => {
+  test('may be shared by several email channels', () => {
+    expect(
+      validate(
+        withChannels([
+          Email({ domain: 'a.example', authservId: 'mx.example.net' }),
+          Email({ domain: 'b.example', authservId: 'mx.example.net' }),
+        ]),
+      ).errors,
+    ).toEqual([])
+  })
+
+  test('cannot disagree between them', () => {
+    // It names the edge in front of the whole worker, not one domain, so two
+    // answers is a config bug. Left legal, the gate would believe whichever
+    // channel the handler happened to pick first — which is a security
+    // decision made by array order.
+    oneError(
+      withChannels([
+        Email({ domain: 'a.example', authservId: 'mx.cloudflare.net' }),
+        Email({ domain: 'b.example', authservId: 'mx.mallory.example' }),
+      ]),
+      /authserv-id/,
+    )
+  })
+})
