@@ -29,6 +29,24 @@ jobs:
       # package.json and the lockfile have drifted apart.
       - run: npm ci
 
-      - run: npm run typecheck
+      # Every check runs even when an earlier one fails, so one push reports
+      # every problem. Otherwise a formatting nit hides a broken test and you
+      # find out on the next round trip.
+      #
+      # Separate jobs would also give that, but each would repeat checkout,
+      # setup-node and `npm ci` — ~20s of setup against ~1s of actual work.
+      # Worth revisiting once the suite needs miniflare and gets slow enough
+      # that a fast lint job is genuinely useful feedback.
 
-      - run: npm test
+      # The same check the pre-commit hook runs. The hook is bypassable, so
+      # this is where formatting and lint are actually enforced.
+      - name: Format and lint
+        run: npm run check
+
+      - name: Typecheck
+        if: ${{ !cancelled() }}
+        run: npm run typecheck
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: npm test

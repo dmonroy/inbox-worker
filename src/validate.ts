@@ -10,7 +10,7 @@
  */
 
 import { parseAddress } from './address'
-import { QUARANTINE, type Channel, type InboxConfig } from './types'
+import { type Channel, type InboxConfig, QUARANTINE } from './types'
 
 export interface ValidationResult {
   errors: string[]
@@ -36,9 +36,7 @@ export function validate(config: InboxConfig): ValidationResult {
 
   for (const key of keys) {
     if (key === QUARANTINE) {
-      errors.push(
-        `Inbox "${QUARANTINE}" is built in and cannot be declared.`,
-      )
+      errors.push(`Inbox "${QUARANTINE}" is built in and cannot be declared.`)
       continue
     }
     if (!INBOX_KEY.test(key)) {
@@ -79,13 +77,13 @@ export function validate(config: InboxConfig): ValidationResult {
 
     for (const [label, domain] of domainsOf(channel)) {
       if (!DOMAIN.test(domain)) {
-        errors.push(`Channel "${channel.id}" has an invalid ${label}: "${domain}".`)
+        errors.push(
+          `Channel "${channel.id}" has an invalid ${label}: "${domain}".`,
+        )
         continue
       }
       if (seen.has(domain)) {
-        errors.push(
-          `Channel "${channel.id}" lists "${domain}" more than once.`,
-        )
+        errors.push(`Channel "${channel.id}" lists "${domain}" more than once.`)
         continue
       }
       seen.add(domain)

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { Email, Member, Team } from '../src/config'
-import { validate } from '../src/validate'
 import type { InboxConfig } from '../src/types'
+import { validate } from '../src/validate'
 
 const ok: InboxConfig = {
   inboxes: { sales: Team('Sales') },
@@ -72,7 +72,9 @@ describe('owner addresses', () => {
     // A login code mailed there needs the login code to read. Legal though,
     // so it must not block a deploy.
     const { errors, warnings } = validate(
-      withInboxes({ darwin: Member('Darwin', { owner: 'darwin@mycompany.com' }) }),
+      withInboxes({
+        darwin: Member('Darwin', { owner: 'darwin@mycompany.com' }),
+      }),
     )
     expect(errors).toEqual([])
     expect(warnings).toHaveLength(1)
@@ -89,7 +91,9 @@ describe('owner addresses', () => {
   test('an external owner is clean', () => {
     expect(
       validate(
-        withInboxes({ darwin: Member('Darwin', { owner: 'darwin@gmail.com' }) }),
+        withInboxes({
+          darwin: Member('Darwin', { owner: 'darwin@gmail.com' }),
+        }),
       ),
     ).toEqual({ errors: [], warnings: [] })
   })

@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# Fast local check. CI is the real gate — this hook is bypassable with
+# --no-verify, so anything it enforces must also run in CI.
+#
+# Installed by the `prepare` script: git config core.hooksPath .githooks
+# No husky, no lint-staged, no dependency.
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(ts|js|json)$' || true)
+
+if [ -n "$staged" ]; then
+  # --no-errors-on-unmatched: staged files may fall outside biome's includes.
+  echo "$staged" | xargs npx biome check --no-errors-on-unmatched
+fi
+
+# Whole-project, because a change in one file breaks types in another.
+npm run --silent typecheck
+
+# Tests are left to CI. They are the loop's tool, run continuously in watch
+# mode — putting the full suite here makes the hook slow enough that people
+# start reaching for --no-verify, which costs more than it saves.
